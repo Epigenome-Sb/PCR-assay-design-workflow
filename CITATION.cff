@@ -1,18 +1,18 @@
 cff-version: 1.2.0
+
 message: "If you use this workflow, please cite it using the metadata below."
 
-title: "Generic VarVAMP qPCR Workflow"
+title: "VarVAMP Assay Design and In Silico Validation Workflow"
 
 type: software
 
 authors:
+  - family-names: "Faham"
+    given-names: "Aymane"
 
-* family-names: "Faham"
-  given-names: "Ayman"
+version: 1.2.0
 
-version: 1.1.0
-
-date-released: 2026-07-25
+date-released: 2026-09-02
 
 license: GPL-3.0-or-later
 
@@ -21,24 +21,34 @@ repository-code: "https://github.com/Epigenome-Sb/varVAMP-qPCR-workflow"
 url: "https://github.com/Epigenome-Sb/varVAMP-qPCR-workflow"
 
 abstract: >-
-An interactive and reproducible command-line workflow for nucleotide
-sequence dereplication, multiple sequence alignment, conservation analysis,
-and qPCR primer/probe design using CD-HIT-EST, MAFFT, and VarVAMP.
-The workflow provides explicit scientific parameter checkpoints for
-CD-HIT-EST clustering, MAFFT alignment strategy selection, and VarVAMP
-qPCR design parameters.
+  An interactive and reproducible command-line workflow for nucleotide
+  sequence preprocessing, multiple sequence alignment, conservation analysis,
+  assay design with VarVAMP, and in silico validation of PCR and qPCR assays.
+  The workflow supports VarVAMP SINGLE, QPCR, and TILED modes and integrates
+  MAFFT, MARS, SeqKit, CD-HIT-EST, trimAl, VarVAMP, MFEprimer, and BLAST+.
+  It provides explicit scientific parameter checkpoints, reproducible
+  workflow metadata, primer-pair target-coverage analysis, and detailed
+  evaluation of qPCR probes, including expansion and comparison of
+  IUPAC-degenerate probe variants.
 
 keywords:
-
-* qPCR
-* primer design
-* probe design
-* VarVAMP
-* CD-HIT-EST
-* MAFFT
-* multiple sequence alignment
-* sequence dereplication
-* conservation analysis
-* nucleotide sequences
-* bioinformatics
-* reproducible workflow
+  - PCR
+  - qPCR
+  - primer design
+  - probe design
+  - in silico validation
+  - VarVAMP
+  - MFEprimer
+  - BLAST
+  - MAFFT
+  - MARS
+  - SeqKit
+  - CD-HIT-EST
+  - trimAl
+  - multiple sequence alignment
+  - sequence dereplication
+  - conservation analysis
+  - IUPAC ambiguity
+  - nucleotide sequences
+  - bioinformatics
+  - reproducible workflow

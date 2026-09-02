@@ -1,30 +1,29 @@
-# Generic VarVAMP qPCR Workflow
+# VarVAMP Assay Design and In Silico Validation Workflow
 
-A reproducible and interactive command-line workflow for nucleotide sequence dereplication, multiple sequence alignment, conservation analysis, and qPCR primer/probe design.
+A reproducible and interactive command-line workflow for nucleotide sequence preprocessing, multiple sequence alignment, conservation analysis, VarVAMP assay design, and in silico validation.
 
-The workflow combines:
+The repository is organized into two complementary workflows:
 
-* **CD-HIT-EST** for nucleotide sequence dereplication;
-* **MAFFT** for multiple sequence alignment;
-* a Python-based per-position conservation analysis;
-* **VarVAMP** for qPCR primer and probe design;
-* interactive scientific parameter checkpoints;
-* generation and collection of tabular and graphical results.
+1. `01_varvamp_assay_design.py` — sequence preprocessing, alignment, conservation analysis, and assay design with VarVAMP.
+2. `02_in_silico_validation.py` — target-coverage and probe validation of VarVAMP designs with MFEprimer and BLAST+.
+
+The workflow supports the three VarVAMP assay modes:
+
+- **SINGLE** — conventional PCR / individual amplicons;
+- **QPCR** — primer pairs with an internal qPCR probe;
+- **TILED** — overlapping amplicons for tiled sequencing.
+
+---
 
 ## Scope
 
-This repository is designed for nucleotide FASTA datasets, including viral genomes, genes, genomic regions, or other comparable nucleotide sequence collections.
+This repository is designed for nucleotide FASTA datasets, including viral genomes, genes, genomic regions, bacterial genomes, and other comparable nucleotide sequence collections.
 
 It is not intended for protein sequences.
 
-The workflow performs computational assay design only. Candidate primers and probes should subsequently be evaluated for:
+The project performs computational assay design and in silico validation. Computational predictions alone do not establish diagnostic sensitivity, specificity, amplification efficiency, or clinical validity. Selected assays should ultimately be validated experimentally.
 
-* taxonomic specificity;
-* genotype, lineage, or strain coverage;
-* primer/probe mismatches;
-* secondary structures;
-* potential off-target amplification;
-* experimental qPCR performance.
+---
 
 ## Workflow overview
 
@@ -32,51 +31,64 @@ The workflow performs computational assay design only. Candidate primers and pro
 Input nucleotide FASTA
         │
         ▼
-FASTA validation
+┌──────────────────────────────────────────────┐
+│ 01_varvamp_assay_design.py                  │
+└──────────────────────────────────────────────┘
         │
-        ▼
-CD-HIT-EST checkpoint
+        ├── FASTA validation
+        ├── Sequence orientation
+        │      ├── keep
+        │      ├── MAFFT --adjustdirection
+        │      └── MAFFT --adjustdirectionaccurately
         │
-        ├── Run dereplication? yes/no
-        ├── Identity threshold (-c)
-        ├── Clustering mode (-g)
-        └── Strand comparison (-r)
+        ├── Sequence topology
+        │      ├── linear
+        │      └── circular → MARS rotation
         │
-        ▼
-MAFFT checkpoint
+        ├── Redundancy handling
+        │      ├── none
+        │      ├── SeqKit exact deduplication
+        │      └── CD-HIT-EST clustering
         │
-        └── Alignment strategy selection
+        ├── Final MAFFT multiple sequence alignment
+        ├── Alignment quality control
+        ├── Optional trimAl trimming
+        ├── Conservation analysis
+        └── VarVAMP assay design
+               ├── SINGLE
+               ├── QPCR
+               └── TILED
+                        │
+                        ▼
+             assay_design_manifest.json
+                        │
+                        ▼
+┌──────────────────────────────────────────────┐
+│ 02_in_silico_validation.py                  │
+└──────────────────────────────────────────────┘
         │
-        ▼
-Multiple sequence alignment
-        │
-        ▼
-Conservation analysis
-        │
-        ▼
-VarVAMP checkpoint
-        │
-        ├── Consensus threshold (-t)
-        ├── Primer ambiguity (-a)
-        └── Probe ambiguity (-pa)
-        │
-        ▼
-Scientific parameter summary
-        │
-        ▼
-User confirmation
-        │
-        ▼
-qPCR design and result generation
+        ├── Detect VarVAMP assay mode
+        ├── Prepare target validation database
+        ├── MFEprimer primer-pair validation
+        ├── Target amplicon extraction
+        └── QPCR only:
+               ├── expand IUPAC-degenerate probe
+               ├── blastn-short
+               ├── per-probe-variant statistics
+               ├── HitID × probe-variant matrix
+               └── global PCR + probe coverage
 ```
 
-The workflow does not silently impose fixed scientific choices for CD-HIT-EST, MAFFT, or VarVAMP during interactive execution. The user explicitly selects the relevant parameters before analysis begins.
+Scientific choices are collected step by step during interactive execution. The workflow does not silently impose fixed choices for orientation, topology, redundancy reduction, MAFFT, trimAl, or VarVAMP parameters.
+
+---
 
 ## Repository structure
 
 ```text
 .
-├── varvamp_qpcr_workflow.py
+├── 01_varvamp_assay_design.py
+├── 02_in_silico_validation.py
 ├── README.md
 ├── LICENSE
 ├── CITATION.cff
@@ -84,30 +96,58 @@ The workflow does not silently impose fixed scientific choices for CD-HIT-EST, M
 ├── .gitignore
 ├── CONTRIBUTING.md
 ├── CHANGELOG.md
+│
 ├── data/
 │   ├── README.md
 │   └── accession_numbers.tsv
+│
 └── results/
     └── README.md
 ```
 
-The `work/` directory is generated automatically during execution and is not intended to be tracked by Git.
+The `work/` directory is created automatically during assay design and is not intended to be tracked by Git.
+
+Validation outputs are generated under `validation_inputs/`.
+
+---
 
 ## Requirements
 
-The workflow requires:
+### Conda / pip dependencies
 
-* Python 3.9 or later;
-* CD-HIT-EST;
-* MAFFT;
-* VarVAMP;
-* Biopython;
-* pandas;
-* matplotlib;
-* Pillow;
-* PyMuPDF.
+The provided `environment.yml` installs:
 
-A Conda environment definition is provided in `environment.yml`.
+- Python 3.11;
+- MAFFT;
+- CD-HIT-EST;
+- SeqKit;
+- trimAl;
+- BLAST+;
+- Biopython;
+- pandas;
+- matplotlib;
+- Pillow;
+- PyMuPDF;
+- VarVAMP 1.3.2.
+
+### Additional external programs
+
+Two programs are currently installed separately from the Conda environment:
+
+**MARS** — used by Workflow 01 for cyclic start-position normalization of complete circular nucleotide sequences.
+
+**MFEprimer** — used by Workflow 02 for primer-pair specificity and target-coverage analysis.
+
+The expected executable names are:
+
+```text
+mars
+mfeprimer
+```
+
+They must be available in the system `PATH`, unless custom executable paths are supplied where supported.
+
+---
 
 ## Installation with Conda
 
@@ -123,505 +163,373 @@ Activate the environment:
 conda activate varvamp-qpcr-workflow
 ```
 
-Environment activation is optional. The workflow can also be executed directly with `conda run`.
+Verify the main Conda-installed programs:
+
+```bash
+python --version
+mafft --version
+cd-hit-est -h
+seqkit version
+trimal --version
+blastn -version
+varvamp --help
+```
+
+Verify the separately installed programs:
+
+```bash
+mars --help
+mfeprimer --help
+```
+
+---
 
 ## Input data
 
-The input must be a nucleotide FASTA file containing at least one sequence.
+The primary input is a nucleotide FASTA file containing at least one sequence.
 
-Accepted characters include standard DNA/RNA nucleotides and IUPAC ambiguity codes.
+Accepted characters include standard DNA/RNA nucleotides and IUPAC ambiguity codes. FASTA record IDs must be unique so that sequences can be tracked through orientation and rotation steps.
 
-Protein FASTA files are rejected.
-
-The FASTA file may be stored in the `data/` directory:
+The FASTA file may be stored under:
 
 ```text
 data/my_sequences.fasta
 ```
 
-or supplied from any valid location on the computer.
+or supplied from any valid filesystem location.
 
-The repository does not need to contain the raw FASTA dataset.
+For reproducible studies, users should document accession numbers, source database, retrieval date, search strategy, inclusion/exclusion criteria, genotype or lineage information, sequence completeness, and analysed genomic region.
 
-For reproducible public studies, users are encouraged to document:
+---
 
-* accession numbers;
-* source database;
-* retrieval date;
-* search strategy;
-* inclusion criteria;
-* exclusion criteria;
-* genotype, lineage, or strain information;
-* sequence completeness;
-* genomic region analysed.
+# Workflow 01 — Assay design
 
 ## Interactive execution
+
+```bash
+python3 01_varvamp_assay_design.py
+```
+
+For detailed external commands and file paths:
+
+```bash
+python3 01_varvamp_assay_design.py --verbose
+```
+
+In normal mode, external commands are recorded in:
+
+```text
+results/<project>/workflow.log
+```
+
+### Step 1 — Sequence orientation
+
+The workflow allows three strategies:
+
+```text
+1. Keep the original orientation
+2. MAFFT --adjustdirection
+3. MAFFT --adjustdirectionaccurately
+```
+
+### Step 2 — Sequence topology
+
+The workflow asks whether sequences are `linear` or `circular`. For complete circular datasets, MARS can normalize cyclic start positions before the final alignment.
+
+### Step 3 — Redundancy handling
+
+Supported strategies:
+
+```text
+none
+SeqKit exact deduplication
+CD-HIT-EST clustering
+```
+
+For CD-HIT-EST, the user can control identity threshold, clustering mode, and strand comparison. A compatible word size is selected automatically.
+
+### Step 4 — Final MAFFT alignment
+
+Supported strategies include:
+
+```text
+Auto
+FFT-NS-1
+FFT-NS-2
+FFT-NS-i (2 cycles)
+FFT-NS-i (up to 1000 cycles)
+NW-NS-2
+NW-NS-i (2 cycles)
+NW-NS-i (up to 1000 cycles)
+L-INS-i
+G-INS-i
+E-INS-i
+NW-NS-PartTree-1
+```
+
+### Step 5 — Alignment QC and trimAl
+
+The workflow calculates alignment length, gap content, column gap statistics, sequence occupancy, and low-occupancy sequence counts. A transparent heuristic assessment is shown before trimming.
+
+Available trimAl strategies are:
+
+```text
+-noallgaps
+-gappyout
+-automated1
+-gt VALUE
+no trimming
+```
+
+### Conservation analysis
+
+For each alignment position, the workflow calculates A/C/G/T counts, gaps, ambiguous characters, occupancy, major base, major-base frequency, Shannon entropy, strict conservation, and threshold-based conservation.
+
+Default thresholds:
+
+```text
+minimum occupancy       = 0.95
+minimum major frequency = 0.95
+```
+
+They can be changed with:
+
+```bash
+--min-occupancy
+--min-major-frequency
+```
+
+### VarVAMP assay design
+
+Workflow 01 supports all three VarVAMP modes.
+
+**SINGLE** — conventional PCR / individual amplicon design.
+
+**QPCR** — primer-pair plus internal-probe design.
+
+Main parameters include:
+
+```text
+-t     VarVAMP consensus threshold
+-a     maximum ambiguous positions per primer
+-pa    maximum ambiguous positions in the probe
+```
+
+**TILED** — overlapping tiled amplicon design.
+
+---
+
+## Assay-design manifest
+
+At the end of Workflow 01, the script generates:
+
+```text
+results/<project>/assay_design_manifest.json
+```
+
+and copies it into the selected VarVAMP result directory.
+
+The manifest records the project name, input FASTA, sequence counts, orientation, topology, redundancy strategy, MAFFT strategy, trimming strategy, conservation thresholds, VarVAMP mode and parameters, result directory, software versions, and workflow log path.
+
+This file provides a reproducible handoff between assay design and in silico validation.
+
+---
+
+# Workflow 02 — In silico validation
 
 Run:
 
 ```bash
-python varvamp_qpcr_workflow.py
+python3 02_in_silico_validation.py
 ```
 
-The workflow first asks for the input file:
-
-```text
-Name or path of the input FASTA file:
-```
-
-Example:
-
-```text
-data/my_sequences.fasta
-```
-
-When only a filename is provided, the workflow searches the current directory and then the `data/` directory.
-
-After validating the FASTA file, the workflow guides the user through the scientific parameter checkpoints.
-
----
-
-# CD-HIT-EST checkpoint
-
-The workflow first asks whether sequence dereplication should be performed:
-
-```text
-Run CD-HIT-EST sequence dereplication? [y/n]:
-```
-
-If CD-HIT-EST is selected, the user must choose the following parameters.
-
-## Identity threshold
-
-```text
-CD-HIT-EST identity threshold (-c) [0.75-1.0]:
-```
-
-The value determines the minimum sequence identity required for clustering.
-
-Example:
-
-```text
-0.95
-```
-
-The workflow automatically selects a compatible CD-HIT-EST word size (`-n`) according to the selected identity threshold.
-
-## Clustering mode
-
-The workflow then asks:
-
-```text
-CD-HIT-EST clustering mode checkpoint
-=====================================
-
-1. Fast mode (-g 0)
-2. Accurate mode (-g 1)
-```
-
-### Fast mode
-
-```text
--g 0
-```
-
-A sequence is assigned to the first cluster representative satisfying the selected identity threshold.
-
-This approach is computationally faster.
-
-### Accurate mode
-
-```text
--g 1
-```
-
-A sequence is compared against the available representatives and assigned to the most similar qualifying cluster.
-
-This approach may provide more precise cluster assignment but requires additional computation.
-
-## Strand comparison
-
-The workflow also controls nucleotide strand comparison:
-
-```text
-CD-HIT-EST strand checkpoint
-============================
-
-1. Compare both +/+ and +/- orientations (-r 1)
-2. Compare only the same orientation, +/+ (-r 0)
-```
-
-For datasets in which sequence orientation may vary, comparison of both strands may be appropriate.
-
-If all sequences are already consistently oriented, same-strand comparison may be sufficient.
-
-## Skipping dereplication
-
-CD-HIT-EST can be skipped entirely.
-
-In that case, all input sequences are passed directly to MAFFT.
-
----
-
-# MAFFT alignment checkpoint
-
-The workflow requires an explicit multiple sequence alignment strategy.
-
-The available strategies are:
-
-```text
-1. Auto
-2. FFT-NS-1
-3. FFT-NS-2
-4. FFT-NS-i (2 cycles)
-5. FFT-NS-i (up to 1000 cycles)
-6. NW-NS-2
-7. NW-NS-i (2 cycles)
-8. NW-NS-i (up to 1000 cycles)
-9. L-INS-i
-10. G-INS-i
-11. E-INS-i
-12. NW-NS-PartTree-1
-```
-
-## Auto
-
-MAFFT automatically selects an appropriate strategy according to the dataset characteristics and size.
-
-## FFT-NS-1
-
-Very fast progressive alignment intended primarily for large datasets.
-
-## FFT-NS-2
-
-Fast progressive alignment using two guide-tree calculations.
-
-## FFT-NS-i
-
-FFT-based alignment followed by iterative refinement.
-
-Two configurations are available:
-
-```text
-FFT-NS-i (2 cycles)
-FFT-NS-i (up to 1000 cycles)
-```
-
-The 1000-cycle configuration provides more intensive refinement while remaining more scalable than the computationally expensive pairwise strategies.
-
-## NW-NS-2
-
-Progressive alignment without FFT approximation.
-
-## NW-NS-i
-
-Iterative refinement without FFT approximation.
-
-Two configurations are available:
-
-```text
-NW-NS-i (2 cycles)
-NW-NS-i (up to 1000 cycles)
-```
-
-## L-INS-i
-
-```text
---localpair --maxiterate 1000
-```
-
-High-accuracy strategy based on local pairwise alignment followed by iterative refinement.
-
-It is suitable when sequences share a locally alignable region but may contain variable flanking regions.
-
-This strategy is computationally intensive and is generally intended for relatively small datasets.
-
-## G-INS-i
-
-```text
---globalpair --maxiterate 1000
-```
-
-High-accuracy strategy based on global pairwise alignment followed by iterative refinement.
-
-It is appropriate when sequences:
-
-* are homologous across most of their length;
-* represent the same genomic region;
-* have similar lengths;
-* are expected to be globally alignable.
-
-Because global pairwise calculations are computationally demanding, G-INS-i is primarily intended for relatively small datasets.
-
-## E-INS-i
-
-```text
---genafpair --maxiterate 1000
-```
-
-Designed for sequences containing several conserved regions separated by long variable or difficult-to-align regions.
-
-## NW-NS-PartTree-1
-
-A scalable strategy intended for extremely large datasets.
-
-The workflow displays a warning when a selected MAFFT strategy is not normally appropriate for the size of the current dataset and requires confirmation before continuing.
-
----
-
-# Conservation analysis
-
-After multiple sequence alignment, the workflow performs a per-position conservation analysis.
-
-For each alignment column, it calculates:
-
-* A, C, G, and T counts;
-* number of gaps;
-* number of ambiguous characters;
-* occupancy;
-* major base;
-* major-base frequency;
-* Shannon entropy;
-* strict conservation;
-* threshold-based conservation.
-
-## Occupancy threshold
-
-The default conservation-analysis occupancy threshold is:
-
-```text
-0.95
-```
-
-A position must therefore be represented in at least 95% of the analysed sequences to satisfy this criterion.
-
-This threshold can be changed using:
+Detailed mode:
 
 ```bash
---min-occupancy
+python3 02_in_silico_validation.py --verbose
 ```
 
-## Major-base frequency
+Workflow 02 detects the available VarVAMP design and adapts validation to the selected assay mode.
 
-The default major-base frequency threshold is:
+## Target validation database
 
-```text
-0.95
-```
-
-This can be changed using:
+The script asks the user to choose a local nucleotide FASTA database. SeqKit is used to produce a one-sequence-line FASTA copy compatible with the MFEprimer validation workflow:
 
 ```bash
---min-major-frequency
+seqkit seq -w 0
 ```
 
-A position contributes its major nucleotide to the conservative consensus when both criteria are satisfied.
+The script verifies that sequence number, sequence length, and ambiguous-base content are preserved.
 
-Positions failing either criterion are represented by:
+## MFEprimer validation
+
+MFEprimer evaluates primer pairs against the selected target database. The workflow reports potential products, valid LEFT/RIGHT products, self-priming products, unique PCR-positive HitIDs, and primer-pair target coverage.
+
+Biological target coverage is calculated using unique HitIDs rather than simply counting predicted amplicons.
+
+## QPCR probe validation
+
+For QPCR designs, Workflow 02 additionally validates the internal probe with local BLAST+ using `blastn-short` against valid MFEprimer amplicons.
+
+### IUPAC-degenerate probes
+
+If a VarVAMP probe contains ambiguous IUPAC positions, Workflow 02 expands it into every concrete A/C/G/T-compatible version before BLAST.
+
+For example:
 
 ```text
-N
+Y = C/T
+K = G/T
 ```
 
-The conservation-analysis thresholds are independent of the VarVAMP consensus threshold.
+A probe containing one `Y` and one `K` produces four concrete variants.
 
-Coordinates generated during this analysis correspond to multiple-sequence-alignment coordinates and are not automatically equivalent to coordinates in a reference genome.
+No new ambiguous bases are introduced; only ambiguity already present in the original VarVAMP probe is expanded.
+
+### Per-probe-variant analysis
+
+Every concrete probe version is analysed independently at unique-PCR-positive-HitID level. The workflow reports:
+
+```text
+Exact match
+1 mismatch
+2 mismatches
+>=3 mismatches
+Partial/gapped alignment
+No hit
+Full-length probe site
+```
+
+These rows must not be naively added together because one target can match more than one probe variant.
+
+The workflow also calculates the best result across all concrete variants for each biological target.
+
+### HitID × probe-variant matrix
+
+For degenerate probes, Workflow 02 writes:
+
+```text
+probe_variant_hitid_matrix.tsv
+probe_variant_statistics.tsv
+```
+
+The matrix records the category obtained by every concrete probe variant against every PCR-positive HitID.
+
+### Probe mismatch categories
+
+```text
+0_MISMATCH
+1_MISMATCH
+2_MISMATCHES
+GE3_MISMATCHES
+PARTIAL_ONLY
+NO_HIT
+```
+
+A full-length probe alignment requires complete query coverage without a gap.
+
+Mismatch categories are descriptive computational results. Experimental effects depend on mismatch position, nucleotide substitution, probe chemistry, melting temperature, and reaction conditions.
 
 ---
 
-# VarVAMP checkpoint
+## Final qPCR coverage
 
-Before qPCR design, the workflow explicitly requests the main VarVAMP parameters.
+The final comparison uses the **complete validation database** as denominator.
 
-No interactive default values are imposed for these parameters.
-
-## Consensus threshold
+For a validation database containing `N` sequences:
 
 ```text
-VarVAMP consensus threshold (-t):
+PCR
+= unique PCR-positive targets / N
+
+PCR + probe exact
+= PCR-positive targets with an exact probe match / N
+
+PCR + probe <=1 MM
+= PCR-positive targets whose best probe variant has 0 or 1 mismatch / N
+
+PCR + probe <=2 MM
+= PCR-positive targets whose best probe variant has 0, 1, or 2 mismatches / N
+
+PCR + full probe site
+= PCR-positive targets with a full-length ungapped probe alignment / N
 ```
 
-Example:
-
-```text
-0.95
-```
-
-Higher values impose a more stringent consensus requirement.
-
-## Primer ambiguity
-
-```text
-Maximum ambiguous bases in each primer (-a):
-```
-
-Example:
-
-```text
-2
-```
-
-This controls the maximum number of IUPAC ambiguous positions permitted in each primer.
-
-A value of:
-
-```text
-0
-```
-
-prohibits ambiguous bases in primers.
-
-## Probe ambiguity
-
-```text
-Maximum ambiguous bases in the probe (-pa):
-```
-
-Example:
-
-```text
-2
-```
-
-This controls the maximum number of ambiguous positions permitted in the qPCR probe.
+Thus, `PCR` represents primer-pair coverage only, whereas each `PCR + probe` column represents the complete primer-plus-probe system.
 
 ---
 
-# Final parameter confirmation
+## Workflow 02 outputs
 
-Before running the main analysis, the workflow displays all selected scientific parameters.
-
-Example:
+Typical validation outputs include:
 
 ```text
-Scientific parameter summary
-============================
-
-CD-HIT-EST identity (-c): 0.95
-CD-HIT-EST mode: accurate
-CD-HIT-EST strand comparison: both
-CD-HIT-EST word size (-n): 10
-
-MAFFT strategy: fft-ns-i-1000
-
-VarVAMP consensus threshold (-t): 0.95
-Primer ambiguity (-a): 2
-Probe ambiguity (-pa): 2
+validation_inputs/
+├── manifest.tsv
+├── validation.log
+├── primer_pairs/
+├── probes/
+├── schemes/
+├── databases/
+│
+└── mfeprimer_coverage/
+    └── <database>/
+        ├── mfeprimer_runs.tsv
+        ├── coverage_results.tsv
+        │
+        └── <scheme>/
+            ├── amplicons_valid.tsv
+            ├── amplicons_valid.fasta
+            ├── positive_hitids.txt
+            ├── non_target_products.tsv
+            ├── coverage_summary.txt
+            ├── probe_blast_raw.tsv
+            ├── probe_blast_amplicon_summary.tsv
+            ├── probe_blast_hitid_summary.tsv
+            ├── probe_blast_alignments_by_amplicon.txt
+            ├── probe_blast_alignments_by_hitid.txt
+            ├── probe_blast_mismatch_positions.tsv
+            ├── probe_blast_summary.txt
+            ├── probe_variant_statistics.tsv
+            └── probe_variant_hitid_matrix.tsv
 ```
 
-The user must explicitly confirm:
-
-```text
-Run the workflow with these parameters? [y/n]:
-```
-
-The analysis begins only after confirmation.
+Probe-specific files are generated only for QPCR designs.
 
 ---
 
-# Execution without activating Conda
+## Non-interactive execution of Workflow 01
 
-The workflow can be executed without manually activating the environment:
+Example for a QPCR design:
 
 ```bash
-conda run --no-capture-output -n varvamp-qpcr-workflow \
-  python varvamp_qpcr_workflow.py
-```
-
-Interactive questions remain available when `--no-capture-output` is used.
-
----
-
-# Non-interactive execution
-
-All required scientific parameters can also be supplied directly on the command line.
-
-Example:
-
-```bash
-python varvamp_qpcr_workflow.py \
+python3 01_varvamp_assay_design.py \
   --input data/my_sequences.fasta \
+  --orientation accurate \
+  --topology circular \
+  --redundancy cdhit \
   --identity 0.95 \
   --cdhit-mode accurate \
   --cdhit-strand both \
-  --mafft-strategy fft-ns-i-1000 \
+  --mafft-strategy auto \
+  --trimming none \
+  --varvamp-mode qpcr \
   --varvamp-threshold 0.95 \
   --primer-ambiguity 2 \
   --probe-ambiguity 2 \
   --threads 8
 ```
 
-With explicit project directories:
+Display available options with:
 
 ```bash
-python varvamp_qpcr_workflow.py \
-  --input data/my_sequences.fasta \
-  --project-name example_project \
-  --workdir work/example_project \
-  --results results/example_project \
-  --identity 0.95 \
-  --cdhit-mode accurate \
-  --cdhit-strand both \
-  --mafft-strategy fft-ns-i-1000 \
-  --varvamp-threshold 0.95 \
-  --primer-ambiguity 2 \
-  --probe-ambiguity 2
-```
-
-To skip CD-HIT-EST:
-
-```bash
-python varvamp_qpcr_workflow.py \
-  --input data/my_sequences.fasta \
-  --skip-cdhit \
-  --mafft-strategy auto \
-  --varvamp-threshold 0.95 \
-  --primer-ambiguity 2 \
-  --probe-ambiguity 2
-```
-
-To skip VarVAMP and perform only preprocessing, alignment, and conservation analysis:
-
-```bash
-python varvamp_qpcr_workflow.py \
-  --input data/my_sequences.fasta \
-  --identity 0.95 \
-  --cdhit-mode accurate \
-  --cdhit-strand both \
-  --mafft-strategy auto \
-  --skip-varvamp
-```
-
-Display all available options with:
-
-```bash
-python varvamp_qpcr_workflow.py --help
+python3 01_varvamp_assay_design.py --help
+python3 02_in_silico_validation.py --help
 ```
 
 ---
 
-# Main command-line parameters
-
-| Option                  | Interactive default | Description                                 |
-| ----------------------- | ------------------: | ------------------------------------------- |
-| `--input`               |                none | Input nucleotide FASTA file                 |
-| `--project-name`        |      FASTA filename | Project identifier                          |
-| `--identity`            |                none | CD-HIT-EST identity threshold               |
-| `--skip-cdhit`          |            disabled | Skip sequence dereplication                 |
-| `--cdhit-mode`          |                none | `fast` or `accurate` clustering             |
-| `--cdhit-strand`        |                none | `both` or `same` strand comparison          |
-| `--mafft-strategy`      |                none | MAFFT alignment strategy                    |
-| `--min-occupancy`       |              `0.95` | Conservation-analysis occupancy threshold   |
-| `--min-major-frequency` |              `0.95` | Conservation major-base frequency threshold |
-| `--varvamp-threshold`   |                none | VarVAMP consensus threshold                 |
-| `--primer-ambiguity`    |                none | Maximum ambiguous bases per primer          |
-| `--probe-ambiguity`     |                none | Maximum ambiguous bases in the probe        |
-| `--threads`             |                 `8` | Number of computational threads             |
-| `--skip-varvamp`        |            disabled | Skip VarVAMP qPCR design                    |
-
----
-
-# Output organization
+## Output organization of Workflow 01
 
 For an input named:
 
@@ -629,11 +537,7 @@ For an input named:
 my_sequences.fasta
 ```
 
-the automatically generated project name is:
-
-```text
-my_sequences
-```
+the default project name is `my_sequences`.
 
 Intermediate files are written to:
 
@@ -641,7 +545,7 @@ Intermediate files are written to:
 work/my_sequences/
 ```
 
-Final results are written to:
+Project results are written to:
 
 ```text
 results/my_sequences/
@@ -651,95 +555,112 @@ Typical outputs include:
 
 ```text
 my_sequences_alignment.fasta
-my_sequences_consensus.fasta
+my_sequences_alignment_trimmed.fasta
+my_sequences_pretrim_alignment_qc.txt
+my_sequences_posttrim_alignment_qc.txt
 my_sequences_conservation_by_position.csv
+my_sequences_consensus.fasta
 my_sequences_conservation_summary.txt
+workflow.log
+workflow_summary.txt
+assay_design_manifest.json
 
-qpcr_primers.tsv
-qpcr_design.tsv
-primers.bed
-amplicons.bed
-
-amplicon_plot.pdf
-per_base_mismatches.pdf
-
-amplicons_overview.png
-primers_overview.png
-
-ambiguous_consensus.fasta
-varvamp_log.txt
+varvamp_single/
+varvamp_qpcr/
+or
+varvamp_tiled/
 ```
 
-VarVAMP output availability depends on whether candidate qPCR systems satisfy the selected filters.
+---
+
+## Reproducibility
+
+For reproducible analysis, retain or report:
+
+1. sequence database and retrieval date;
+2. accession numbers;
+3. inclusion and exclusion criteria;
+4. sequence completeness;
+5. orientation strategy;
+6. sequence topology;
+7. MARS use, when applicable;
+8. redundancy strategy;
+9. CD-HIT-EST parameters, when applicable;
+10. MAFFT strategy;
+11. alignment QC;
+12. trimAl strategy and threshold, when applicable;
+13. conservation-analysis thresholds;
+14. VarVAMP mode;
+15. VarVAMP consensus threshold;
+16. primer ambiguity limit;
+17. probe ambiguity limit for QPCR;
+18. mode-specific VarVAMP parameters;
+19. software versions;
+20. validation FASTA database;
+21. MFEprimer parameters;
+22. target-amplicon extraction filter;
+23. BLAST probe-analysis parameters;
+24. primer coverage on the complete validation dataset;
+25. probe-match statistics;
+26. concrete IUPAC probe variants;
+27. experimental validation of the selected assay.
+
+Workflow 01 automatically records many of these settings in:
+
+```text
+assay_design_manifest.json
+workflow_summary.txt
+workflow.log
+```
+
+Workflow 02 writes corresponding validation tables and logs.
 
 ---
 
-# Reproducibility
+## Important interpretation notes
 
-Because CD-HIT-EST, MAFFT, and VarVAMP parameters can now be selected interactively, the exact parameter configuration used for an analysis should always be recorded.
+**Cluster representatives:** if clustering is used for design, validation should ideally also be assessed against the original or another appropriate validation dataset, not only cluster representatives.
 
-Before reporting or publishing results:
+**Circular genomes:** arbitrary FASTA start positions can affect linearized analyses. MARS normalization helps standardize cyclic starts before alignment and assay design.
 
-1. record the sequence database and retrieval date;
-2. retain accession numbers and inclusion/exclusion criteria;
-3. record software versions;
-4. record the CD-HIT-EST identity threshold;
-5. record the CD-HIT-EST clustering mode;
-6. record the CD-HIT-EST strand-comparison mode;
-7. record the MAFFT strategy;
-8. record the conservation-analysis thresholds;
-9. record the VarVAMP consensus threshold;
-10. record primer and probe ambiguity limits;
-11. record the number of threads;
-12. run the workflow from a clean output directory;
-13. evaluate assay coverage using the original dataset, not only cluster representatives;
-14. evaluate candidates by genotype, lineage, strain, or other biologically relevant grouping;
-15. perform independent in silico specificity analysis;
-16. experimentally validate selected assays.
+**Primer/probe mismatches:** computational mismatch counts are descriptive. Experimental impact depends on mismatch position, chemistry, melting temperature, reaction conditions, and other factors.
 
-Computational predictions alone do not establish diagnostic sensitivity, specificity, amplification efficiency, or clinical validity.
+**Internal versus independent validation:** validation against the same dataset used for design measures internal target coverage. Independent external sequence datasets provide stronger evidence of assay generalizability.
 
 ---
 
-# Third-party software
+## Third-party software
 
-This repository does not redistribute CD-HIT-EST, MAFFT, or VarVAMP.
+This repository does not redistribute third-party software.
 
-These programs are installed separately through the provided environment definition.
+The workflow uses or can use:
 
-Users should cite the original software publications when reporting analyses performed with:
+- CD-HIT/CD-HIT-EST;
+- MAFFT;
+- SeqKit;
+- MARS;
+- trimAl;
+- VarVAMP;
+- MFEprimer;
+- NCBI BLAST+.
 
-* CD-HIT/CD-HIT-EST;
-* MAFFT;
-* VarVAMP.
-
-VarVAMP is developed and maintained by its original authors and is distributed under the GNU General Public License.
+Users should cite the original software publications when reporting analyses produced using these tools.
 
 ---
 
-# Citation
+## Citation
 
-Citation metadata for this workflow are provided in:
+Citation metadata for this repository are provided in:
 
 ```text
 CITATION.cff
 ```
 
-When this file is present on the default GitHub branch, GitHub can display a:
-
-```text
-Cite this repository
-```
-
-option.
-
 ---
 
-# License
+## License
 
-The workflow code in this repository is licensed under the:
-
-**GNU General Public License v3.0 or later**
+The workflow code in this repository is licensed under the **GNU General Public License v3.0 or later**.
 
 See:
 
@@ -747,4 +668,4 @@ See:
 LICENSE
 ```
 
-Input sequence datasets and generated scientific results may be subject to separate terms depending on their source databases, institutional policies, collaborators, or data-use agreements.
+Input sequence datasets and generated scientific results may be subject to separate terms depending on source databases, institutional policies, collaborators, or data-use agreements.

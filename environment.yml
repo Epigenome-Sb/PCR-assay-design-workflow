@@ -6,13 +6,55 @@ channels:
 
 dependencies:
   - python=3.11
-  - cd-hit=4.8.1
+
+  # ============================================================
+  # Workflow 01 - Assay design
+  # ============================================================
+
+  # Sequence orientation and multiple sequence alignment
   - mafft=7.505
+
+  # Redundancy reduction
+  - cd-hit=4.8.1
+  - seqkit
+
+  # Alignment trimming
+  - trimal
+
+  # Python libraries
   - biopython
   - pandas
   - matplotlib
   - pillow
   - pymupdf
+
+  # ============================================================
+  # Workflow 02 - In silico validation
+  # ============================================================
+
+  # FASTA processing
+  # SeqKit is already installed above
+
+  # Probe validation with blastn-short
+  - blast
+
+  # ============================================================
+  # VarVAMP
+  # ============================================================
+
   - pip
   - pip:
       - varvamp==1.3.2
+
+
+# ==============================================================
+# Additional external programs
+# ==============================================================
+
+# Workflow 01:
+# - MARS
+#   Circular genome start-position normalization
+#
+# Workflow 02:
+# - MFEprimer
+#   Primer-pair specificity and target-coverage analysis
