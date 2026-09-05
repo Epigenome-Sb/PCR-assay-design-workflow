@@ -38,6 +38,7 @@ and copies the manifest into the selected varvamp_<mode>/ result directory.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -145,6 +146,7 @@ def write_project_manifest(
     after_redundancy: int,
     args: argparse.Namespace,
     varvamp_results: Path | None,
+    varvamp_attempts: list[dict[str, object]] | None = None,
 ) -> None:
     """
     Write a machine-readable handoff between assay design and validation.
@@ -196,7 +198,9 @@ def write_project_manifest(
             "min_major_frequency": args.min_major_frequency,
         },
         "varvamp": {
-            "executed": not args.skip_varvamp,
+            "executed": bool(varvamp_attempts)
+            if varvamp_attempts is not None
+            else not args.skip_varvamp,
             "mode": None if args.skip_varvamp else args.varvamp_mode,
             "result_dir": (
                 None
@@ -219,6 +223,7 @@ def write_project_manifest(
                 if args.varvamp_config is None
                 else str(args.varvamp_config.expanduser().resolve())
             ),
+            "attempts": varvamp_attempts or [],
         },
         "tool_versions": selected_tools,
         "workflow_log": (
@@ -495,7 +500,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--tiled-max-length", type=int, default=None)
     parser.add_argument("--tiled-overlap", type=int, default=None)
     parser.add_argument("--qpcr-test-n", type=int, default=None)
-    parser.add_argument("--qpcr-deltag", type=float, default=None)
+    parser.add_argument("--qpcr-deltag", type=int, default=None)
     parser.add_argument(
         "--varvamp-config",
         type=Path,
@@ -683,6 +688,40 @@ def ask_float_with_default(label: str, default: float) -> float:
             return float(raw)
         except ValueError:
             print("Please enter a numeric value.")
+
+
+def ask_integer_with_default(
+    label: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Request an integer while explicitly displaying and validating a default."""
+
+    while True:
+        raw = input(f"{label} [default {default}]: ").strip()
+        if not raw:
+            value = default
+        else:
+            try:
+                value = int(raw)
+            except ValueError:
+                print("Please enter an integer (for example -3, 0, 50).")
+                continue
+
+        if minimum is not None and value < minimum:
+            print(f"The value must be >= {minimum}.")
+            continue
+        if maximum is not None and value > maximum:
+            print(f"The value must be <= {maximum}.")
+            continue
+        return value
+
+
+def ask_non_negative_integer_with_default(label: str, default: int) -> int:
+    """Request a non-negative integer with a default."""
+    return ask_integer_with_default(label, default, minimum=0)
 
 
 # ---------------------------------------------------------------------------
@@ -1135,7 +1174,6 @@ def normalize_orientation_with_mafft(
 
     if VERBOSE:
         print(f"Oriented FASTA: {oriented_file.resolve()}")
-    print(f"Reverse-complemented sequences: {len(reversed_ids)}")
     return oriented_file, len(reversed_ids)
 
 
@@ -1232,9 +1270,7 @@ def cd_hit_word_size(identity: float) -> int:
         return 6
     if 0.80 <= identity < 0.85:
         return 5
-    if 0.75 <= identity < 0.80:
-        return 4
-    raise ValueError("CD-HIT-EST identity must be between 0.75 and 1.0.")
+    raise ValueError("CD-HIT-EST identity must be between 0.80 and 1.0.")
 
 
 def run_seqkit_deduplication(
@@ -1336,20 +1372,70 @@ def run_final_mafft(
     strategy: str,
     threads: int,
     mafft_executable: str,
-) -> None:
-    """Run the final multiple sequence alignment."""
+) -> str:
+    """
+    Run the final multiple-sequence alignment and return the strategy reported
+    by MAFFT when it can be detected from stderr.
+    """
 
     mafft_arguments = list(MAFFT_STRATEGIES[strategy]["arguments"])
-    run_command(
-        [
-            mafft_executable,
-            *mafft_arguments,
-            "--thread",
-            str(threads),
-            str(input_file),
-        ],
-        stdout_file=output_file,
+    command = [
+        mafft_executable,
+        *mafft_arguments,
+        "--thread",
+        str(threads),
+        str(input_file),
+    ]
+    command_text = " ".join(command) + f" > {output_file}"
+    log_line("COMMAND: " + command_text)
+
+    if VERBOSE:
+        print("\nCommand:", command_text)
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    stderr_lines: list[str] = []
+
+    try:
+        with output_file.open("w", encoding="utf-8") as handle:
+            process = subprocess.Popen(
+                command,
+                stdout=handle,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+
+            assert process.stderr is not None
+            for line in process.stderr:
+                stderr_lines.append(line)
+                print(line, end="")
+
+            return_code = process.wait()
+    except OSError as error:
+        raise RuntimeError(
+            "Could not start MAFFT command: " + command_text
+        ) from error
+
+    if return_code != 0:
+        raise RuntimeError(
+            f"Command failed with exit code {return_code}: {command_text}"
+        )
+
+    stderr_text = "".join(stderr_lines)
+    match = re.search(
+        r"Strategy:\s*\n\s*([^\n]+)",
+        stderr_text,
+        flags=re.IGNORECASE,
     )
+
+    if not match:
+        return strategy
+
+    reported = match.group(1).strip()
+    # MAFFT may append a short explanation in parentheses.
+    return reported.split("(", 1)[0].strip()
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1901,58 +1987,625 @@ def choose_varvamp_mode() -> str:
     )
 
 
-def configure_interactive_varvamp_advanced(args: argparse.Namespace, mode: str) -> None:
-    """Optionally collect documented mode-specific VarVAMP parameters."""
+def ask_single_report_n(default: str = "inf") -> str:
+    """Request VarVAMP SINGLE -n as a positive integer or 'inf'."""
+    while True:
+        raw = input(
+            f"Number of top hits to report (-n) [default {default}]: "
+        ).strip()
+        if not raw:
+            return default
+        if raw.lower() == "inf":
+            return "inf"
+        try:
+            value = int(raw)
+        except ValueError:
+            print("Enter a positive integer or 'inf'.")
+            continue
+        if value <= 0:
+            print("Enter a positive integer or 'inf'.")
+            continue
+        return str(value)
 
-    if not ask_yes_no("Configure additional mode-specific VarVAMP parameters?"):
+
+def configure_interactive_varvamp_advanced(
+    args: argparse.Namespace,
+    mode: str,
+    *,
+    force: bool = False,
+) -> None:
+    """
+    Collect documented mode-specific VarVAMP CLI parameters.
+
+    Values are validated before VarVAMP is launched so type errors such as
+    passing '-3.0' to an integer-only option cannot reach VarVAMP.
+    """
+
+    if not force and not ask_yes_no(
+        "Configure additional mode-specific VarVAMP parameters?"
+    ):
         return
 
     if mode == "single":
-        args.single_opt_length = ask_positive_integer_with_default(
-            "Optimal amplicon length (-ol)", 1000
-        )
-        args.single_max_length = ask_positive_integer_with_default(
-            "Maximum amplicon length (-ml)", 1500
-        )
         while True:
-            raw = input("Number of top hits to report (-n) [default inf]: ").strip()
-            if not raw:
-                args.single_report_n = "inf"
-                break
-            if raw.lower() == "inf":
-                args.single_report_n = "inf"
-                break
-            try:
-                value = int(raw)
-            except ValueError:
-                print("Enter a positive integer or 'inf'.")
+            opt_length = ask_positive_integer_with_default(
+                "Optimal amplicon length (-ol)",
+                args.single_opt_length or 1000,
+            )
+            max_length = ask_positive_integer_with_default(
+                "Maximum amplicon length (-ml)",
+                args.single_max_length or 1500,
+            )
+            if max_length < opt_length:
+                print(
+                    "Maximum amplicon length (-ml) must be >= "
+                    "optimal amplicon length (-ol)."
+                )
                 continue
-            if value <= 0:
-                print("Enter a positive integer or 'inf'.")
-                continue
-            args.single_report_n = str(value)
+            args.single_opt_length = opt_length
+            args.single_max_length = max_length
             break
 
+        args.single_report_n = ask_single_report_n(
+            args.single_report_n or "inf"
+        )
+
     elif mode == "tiled":
-        args.tiled_opt_length = ask_positive_integer_with_default(
-            "Optimal amplicon length (-ol)", 1000
-        )
-        args.tiled_max_length = ask_positive_integer_with_default(
-            "Maximum amplicon length (-ml)", 1500
-        )
-        args.tiled_overlap = ask_positive_integer_with_default(
-            "Minimum amplicon-insert overlap (-o)", 100
+        while True:
+            opt_length = ask_positive_integer_with_default(
+                "Optimal amplicon length (-ol)",
+                args.tiled_opt_length or 1000,
+            )
+            max_length = ask_positive_integer_with_default(
+                "Maximum amplicon length (-ml)",
+                args.tiled_max_length or 1500,
+            )
+            if max_length < opt_length:
+                print(
+                    "Maximum amplicon length (-ml) must be >= "
+                    "optimal amplicon length (-ol)."
+                )
+                continue
+            args.tiled_opt_length = opt_length
+            args.tiled_max_length = max_length
+            break
+
+        args.tiled_overlap = ask_non_negative_integer_with_default(
+            "Minimum amplicon-insert overlap (-o)",
+            args.tiled_overlap if args.tiled_overlap is not None else 100,
         )
 
     elif mode == "qpcr":
         args.qpcr_test_n = ask_positive_integer_with_default(
             "Number of top qPCR amplicons tested for secondary structures (-n)",
-            50,
+            args.qpcr_test_n or 50,
         )
-        args.qpcr_deltag = ask_float_with_default(
-            "Minimum deltaG cutoff (-d)", -3.0
+        args.qpcr_deltag = ask_integer_with_default(
+            "Minimum deltaG cutoff (-d)",
+            args.qpcr_deltag if args.qpcr_deltag is not None else -3,
         )
 
+
+VARVAMP_ADVANCED_CONFIG_DEFAULTS: dict[str, dict[str, object]] = {
+    "single": {
+        "PRIMER_SIZES": (18, 25, 21),
+        "PRIMER_TMP": (56, 63, 60),
+        "PRIMER_GC_RANGE": (30, 75, 50),
+    },
+    "tiled": {
+        "PRIMER_SIZES": (18, 25, 21),
+        "PRIMER_TMP": (56, 63, 60),
+        "PRIMER_GC_RANGE": (30, 75, 50),
+    },
+    "qpcr": {
+        "PRIMER_SIZES": (18, 25, 21),
+        "PRIMER_TMP": (56, 63, 60),
+        "PRIMER_GC_RANGE": (30, 75, 50),
+        "QPROBE_SIZES": (18, 30, 25),
+        "QPROBE_TMP": (60, 72, 67),
+        "QPROBE_GC_RANGE": (35, 85, 60),
+        "QPRIMER_DIFF": 3,
+        "QPROBE_TEMP_DIFF": (2, 12),
+        "QPROBE_DISTANCE": (4, 25),
+        "QAMPLICON_LENGTH": (70, 200),
+        "QAMPLICON_GC": (40, 60),
+    },
+}
+
+
+VARVAMP_ADVANCED_CONFIG_ORDER: dict[str, tuple[str, ...]] = {
+    "single": (
+        "PRIMER_SIZES",
+        "PRIMER_TMP",
+        "PRIMER_GC_RANGE",
+    ),
+    "tiled": (
+        "PRIMER_SIZES",
+        "PRIMER_TMP",
+        "PRIMER_GC_RANGE",
+    ),
+    "qpcr": (
+        "PRIMER_SIZES",
+        "PRIMER_TMP",
+        "PRIMER_GC_RANGE",
+        "QPROBE_SIZES",
+        "QPROBE_TMP",
+        "QPROBE_GC_RANGE",
+        "QPRIMER_DIFF",
+        "QPROBE_TEMP_DIFF",
+        "QPROBE_DISTANCE",
+        "QAMPLICON_LENGTH",
+        "QAMPLICON_GC",
+    ),
+}
+
+
+def render_custom_varvamp_config(mode: str, values: dict[str, object]) -> str:
+    """Render a mode-specific custom VarVAMP Python configuration."""
+    lines = [
+        f"# Custom VarVAMP {mode.upper()} configuration.",
+        "# Created interactively by 01_varvamp_assay_design.py.",
+        "# This file is used only when explicitly selected for this workflow run.",
+        "",
+    ]
+
+    for name in VARVAMP_ADVANCED_CONFIG_ORDER[mode]:
+        lines.append(f"{name} = {values[name]!r}")
+        if name in {
+            "PRIMER_GC_RANGE",
+            "QPROBE_GC_RANGE",
+            "QPRIMER_DIFF",
+        }:
+            lines.append("")
+        elif name == "QPROBE_DISTANCE":
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _literal_assignments_from_python(path: Path) -> dict[str, object]:
+    """Safely read simple literal assignments from a Python config file."""
+    source = path.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError as error:
+        raise ValueError(
+            f"Python syntax error in {path.name}: {error.msg} "
+            f"(line {error.lineno})."
+        ) from error
+
+    values: dict[str, object] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        try:
+            values[target.id] = ast.literal_eval(node.value)
+        except (ValueError, TypeError):
+            # Unknown/non-literal VarVAMP settings are left for VarVAMP itself.
+            continue
+    return values
+
+
+def _validate_min_max_opt(
+    name: str,
+    value: object,
+    *,
+    positive: bool = False,
+    percentage: bool = False,
+) -> None:
+    """Validate a (min, max, opt) tuple used by VarVAMP."""
+    if not isinstance(value, tuple) or len(value) != 3:
+        raise ValueError(f"{name} must be a 3-item tuple: (min, max, opt).")
+    if not all(isinstance(item, (int, float)) for item in value):
+        raise ValueError(f"{name} values must be numeric.")
+
+    minimum, maximum, optimum = value
+    if minimum > optimum or optimum > maximum:
+        raise ValueError(
+            f"{name} must satisfy min <= opt <= max; found {value}."
+        )
+    if positive and minimum <= 0:
+        raise ValueError(f"{name} values must be greater than zero.")
+    if percentage and (minimum < 0 or maximum > 100):
+        raise ValueError(f"{name} values must remain between 0 and 100.")
+
+
+def _validate_min_max(
+    name: str,
+    value: object,
+    *,
+    non_negative: bool = False,
+    positive: bool = False,
+    percentage: bool = False,
+) -> None:
+    """Validate a (min, max) tuple used by VarVAMP."""
+    if not isinstance(value, tuple) or len(value) != 2:
+        raise ValueError(f"{name} must be a 2-item tuple: (min, max).")
+    if not all(isinstance(item, (int, float)) for item in value):
+        raise ValueError(f"{name} values must be numeric.")
+
+    minimum, maximum = value
+    if minimum > maximum:
+        raise ValueError(f"{name} must satisfy min <= max; found {value}.")
+    if non_negative and minimum < 0:
+        raise ValueError(f"{name} values cannot be negative.")
+    if positive and minimum <= 0:
+        raise ValueError(f"{name} values must be greater than zero.")
+    if percentage and (minimum < 0 or maximum > 100):
+        raise ValueError(f"{name} values must remain between 0 and 100.")
+
+
+def validate_custom_varvamp_config(path: Path, mode: str) -> None:
+    """
+    Validate Python syntax and the known core settings written by this workflow.
+
+    Unknown VarVAMP settings are not rejected, which lets an experienced user
+    add other valid VarVAMP configuration variables manually.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"VarVAMP config file not found: {path}")
+
+    values = _literal_assignments_from_python(path)
+
+    for name in ("PRIMER_SIZES", "PRIMER_TMP", "PRIMER_GC_RANGE"):
+        if name not in values:
+            continue
+        if name == "PRIMER_SIZES":
+            _validate_min_max_opt(name, values[name], positive=True)
+        elif name == "PRIMER_GC_RANGE":
+            _validate_min_max_opt(name, values[name], percentage=True)
+        else:
+            _validate_min_max_opt(name, values[name])
+
+    if mode == "qpcr":
+        if "QPROBE_SIZES" in values:
+            _validate_min_max_opt(
+                "QPROBE_SIZES",
+                values["QPROBE_SIZES"],
+                positive=True,
+            )
+        if "QPROBE_TMP" in values:
+            _validate_min_max_opt("QPROBE_TMP", values["QPROBE_TMP"])
+        if "QPROBE_GC_RANGE" in values:
+            _validate_min_max_opt(
+                "QPROBE_GC_RANGE",
+                values["QPROBE_GC_RANGE"],
+                percentage=True,
+            )
+        if "QPRIMER_DIFF" in values:
+            value = values["QPRIMER_DIFF"]
+            if not isinstance(value, (int, float)) or value < 0:
+                raise ValueError("QPRIMER_DIFF must be a non-negative number.")
+        if "QPROBE_TEMP_DIFF" in values:
+            _validate_min_max(
+                "QPROBE_TEMP_DIFF",
+                values["QPROBE_TEMP_DIFF"],
+                non_negative=True,
+            )
+        if "QPROBE_DISTANCE" in values:
+            _validate_min_max(
+                "QPROBE_DISTANCE",
+                values["QPROBE_DISTANCE"],
+                non_negative=True,
+            )
+        if "QAMPLICON_LENGTH" in values:
+            _validate_min_max(
+                "QAMPLICON_LENGTH",
+                values["QAMPLICON_LENGTH"],
+                positive=True,
+            )
+        if "QAMPLICON_GC" in values:
+            _validate_min_max(
+                "QAMPLICON_GC",
+                values["QAMPLICON_GC"],
+                percentage=True,
+            )
+
+
+def next_custom_varvamp_config_path(
+    results_dir: Path,
+    mode: str,
+) -> Path:
+    """Return a new attempt-specific config filename without overwriting older files."""
+    attempt = 1
+    while True:
+        candidate = (
+            results_dir
+            / f"varvamp_{mode}_config_attempt_{attempt}.py"
+        )
+        if not candidate.exists():
+            return candidate
+        attempt += 1
+
+
+def ask_integer_keep_default(
+    label: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Ask for an integer, keeping the displayed value when Enter is pressed."""
+    while True:
+        raw = input(f"  {label} [{default}]: ").strip()
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            print("  Please enter an integer, or press Enter to keep the current value.")
+            continue
+        if minimum is not None and value < minimum:
+            print(f"  The value must be >= {minimum}.")
+            continue
+        if maximum is not None and value > maximum:
+            print(f"  The value must be <= {maximum}.")
+            continue
+        return value
+
+
+def edit_min_max_opt_value(
+    name: str,
+    current: tuple[int, int, int],
+    *,
+    positive: bool = False,
+    percentage: bool = False,
+) -> tuple[int, int, int]:
+    """Edit a (minimum, maximum, optimum) setting directly in the terminal."""
+    while True:
+        minimum_limit = 1 if positive else (0 if percentage else None)
+        maximum_limit = 100 if percentage else None
+
+        print(f"\n{name} = {current}")
+        minimum = ask_integer_keep_default(
+            "Minimum",
+            current[0],
+            minimum=minimum_limit,
+            maximum=maximum_limit,
+        )
+        maximum = ask_integer_keep_default(
+            "Maximum",
+            current[1],
+            minimum=minimum_limit,
+            maximum=maximum_limit,
+        )
+        optimum = ask_integer_keep_default(
+            "Optimal",
+            current[2],
+            minimum=minimum_limit,
+            maximum=maximum_limit,
+        )
+        candidate = (minimum, maximum, optimum)
+
+        try:
+            _validate_min_max_opt(
+                name,
+                candidate,
+                positive=positive,
+                percentage=percentage,
+            )
+        except ValueError as error:
+            print(f"  Invalid value: {error}")
+            print("  Please enter this parameter again.")
+            continue
+        return candidate
+
+
+def edit_min_max_value(
+    name: str,
+    current: tuple[int, int],
+    *,
+    non_negative: bool = False,
+    positive: bool = False,
+    percentage: bool = False,
+) -> tuple[int, int]:
+    """Edit a (minimum, maximum) setting directly in the terminal."""
+    while True:
+        minimum_limit = None
+        if positive:
+            minimum_limit = 1
+        elif non_negative or percentage:
+            minimum_limit = 0
+        maximum_limit = 100 if percentage else None
+
+        print(f"\n{name} = {current}")
+        minimum = ask_integer_keep_default(
+            "Minimum",
+            current[0],
+            minimum=minimum_limit,
+            maximum=maximum_limit,
+        )
+        maximum = ask_integer_keep_default(
+            "Maximum",
+            current[1],
+            minimum=minimum_limit,
+            maximum=maximum_limit,
+        )
+        candidate = (minimum, maximum)
+
+        try:
+            _validate_min_max(
+                name,
+                candidate,
+                non_negative=non_negative,
+                positive=positive,
+                percentage=percentage,
+            )
+        except ValueError as error:
+            print(f"  Invalid value: {error}")
+            print("  Please enter this parameter again.")
+            continue
+        return candidate
+
+
+def edit_varvamp_config_in_terminal(
+    mode: str,
+    initial_values: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Display default/current settings and let the user modify them in-terminal."""
+    values = dict(VARVAMP_ADVANCED_CONFIG_DEFAULTS[mode])
+    if initial_values:
+        for name in VARVAMP_ADVANCED_CONFIG_ORDER[mode]:
+            if name in initial_values:
+                values[name] = initial_values[name]
+
+    section(f"Edit advanced {mode.upper()} VarVAMP configuration")
+    print("The current values are shown in brackets.")
+    print("Press Enter without typing anything to keep a value unchanged.")
+    print("The configuration is saved only after you confirm it at the end.")
+
+    values["PRIMER_SIZES"] = edit_min_max_opt_value(
+        "PRIMER_SIZES",
+        values["PRIMER_SIZES"],
+        positive=True,
+    )
+    values["PRIMER_TMP"] = edit_min_max_opt_value(
+        "PRIMER_TMP",
+        values["PRIMER_TMP"],
+    )
+    values["PRIMER_GC_RANGE"] = edit_min_max_opt_value(
+        "PRIMER_GC_RANGE",
+        values["PRIMER_GC_RANGE"],
+        percentage=True,
+    )
+
+    if mode == "qpcr":
+        values["QPROBE_SIZES"] = edit_min_max_opt_value(
+            "QPROBE_SIZES",
+            values["QPROBE_SIZES"],
+            positive=True,
+        )
+        values["QPROBE_TMP"] = edit_min_max_opt_value(
+            "QPROBE_TMP",
+            values["QPROBE_TMP"],
+        )
+        values["QPROBE_GC_RANGE"] = edit_min_max_opt_value(
+            "QPROBE_GC_RANGE",
+            values["QPROBE_GC_RANGE"],
+            percentage=True,
+        )
+
+        print(f"\nQPRIMER_DIFF = {values['QPRIMER_DIFF']}")
+        values["QPRIMER_DIFF"] = ask_integer_keep_default(
+            "Value",
+            int(values["QPRIMER_DIFF"]),
+            minimum=0,
+        )
+        values["QPROBE_TEMP_DIFF"] = edit_min_max_value(
+            "QPROBE_TEMP_DIFF",
+            values["QPROBE_TEMP_DIFF"],
+            non_negative=True,
+        )
+        values["QPROBE_DISTANCE"] = edit_min_max_value(
+            "QPROBE_DISTANCE",
+            values["QPROBE_DISTANCE"],
+            non_negative=True,
+        )
+        values["QAMPLICON_LENGTH"] = edit_min_max_value(
+            "QAMPLICON_LENGTH",
+            values["QAMPLICON_LENGTH"],
+            positive=True,
+        )
+        values["QAMPLICON_GC"] = edit_min_max_value(
+            "QAMPLICON_GC",
+            values["QAMPLICON_GC"],
+            percentage=True,
+        )
+
+    return values
+
+
+def configure_custom_varvamp_file(
+    args: argparse.Namespace,
+    mode: str,
+    results_dir: Path,
+) -> bool:
+    """
+    Explicitly create/edit or select a custom VarVAMP Python configuration.
+
+    New custom configurations are edited directly in the terminal. No
+    previously created custom configuration is auto-detected or auto-loaded.
+    """
+    choice = ask_required_choice(
+        f"Advanced {mode.upper()} VarVAMP configuration",
+        [
+            (
+                "create",
+                "Create/edit a new mode-specific configuration directly in the terminal.",
+            ),
+            (
+                "existing",
+                "Use an existing Python configuration file by entering its path.",
+            ),
+            (
+                "return",
+                "Return without changing the configuration.",
+            ),
+        ],
+    )
+
+    if choice == "return":
+        return False
+
+    if choice == "create":
+        values = dict(VARVAMP_ADVANCED_CONFIG_DEFAULTS[mode])
+
+        while True:
+            section(f"Default {mode.upper()} VarVAMP configuration")
+            print(render_custom_varvamp_config(mode, values).rstrip())
+            print()
+            print(
+                "You can now modify these values directly in the terminal. "
+                "Press Enter at any prompt to keep the displayed value."
+            )
+
+            values = edit_varvamp_config_in_terminal(mode, values)
+
+            section("Configuration preview")
+            preview = render_custom_varvamp_config(mode, values)
+            print(preview.rstrip())
+
+            if ask_yes_no("Save this configuration and use it for this VarVAMP attempt?"):
+                path = next_custom_varvamp_config_path(results_dir, mode)
+                path.write_text(preview, encoding="utf-8")
+                validate_custom_varvamp_config(path, mode)
+                args.varvamp_config = path
+
+                section("Custom VarVAMP configuration saved")
+                print(f"File: {compact_path(path)}")
+                print(
+                    "This file will NOT be loaded automatically in a future workflow run."
+                )
+                return True
+
+            if not ask_yes_no("Modify the configuration again?"):
+                return False
+
+    while True:
+        raw = input("Path to the existing VarVAMP config.py: ").strip().strip("'\"")
+        if not raw:
+            print("A file path is required.")
+            continue
+
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        else:
+            path = path.resolve()
+
+        try:
+            validate_custom_varvamp_config(path, mode)
+        except (FileNotFoundError, ValueError) as error:
+            print(f"Configuration error: {error}")
+            if ask_yes_no("Try another configuration file?"):
+                continue
+            return False
+
+        args.varvamp_config = path
+        return True
 
 def build_varvamp_command(
     args: argparse.Namespace,
@@ -1960,7 +2613,7 @@ def build_varvamp_command(
     alignment_file: Path,
     output_dir: Path,
 ) -> list[str]:
-    """Build a VarVAMP command using documented mode-specific arguments."""
+    """Build a VarVAMP command using validated mode-specific arguments."""
 
     command = [
         args.varvamp_executable,
@@ -1978,7 +2631,7 @@ def build_varvamp_command(
         if args.qpcr_test_n is not None:
             command.extend(["-n", str(args.qpcr_test_n)])
         if args.qpcr_deltag is not None:
-            command.extend(["-d", str(args.qpcr_deltag)])
+            command.extend(["-d", str(int(args.qpcr_deltag))])
 
     elif mode == "single":
         if args.single_opt_length is not None:
@@ -2001,7 +2654,7 @@ def build_varvamp_command(
 
 
 def validate_varvamp_mode_parameters(args: argparse.Namespace, mode: str) -> None:
-    """Validate common and mode-specific VarVAMP parameters."""
+    """Validate common and mode-specific VarVAMP parameters before execution."""
 
     if args.varvamp_threshold is None:
         raise RuntimeError("VarVAMP consensus threshold (-t) is required.")
@@ -2009,16 +2662,34 @@ def validate_varvamp_mode_parameters(args: argparse.Namespace, mode: str) -> Non
 
     if args.primer_ambiguity is None:
         raise RuntimeError("Primer ambiguity (-a) is required.")
-    if args.primer_ambiguity < 0:
-        raise ValueError("--primer-ambiguity cannot be negative.")
+    if not isinstance(args.primer_ambiguity, int) or args.primer_ambiguity < 0:
+        raise ValueError("--primer-ambiguity must be a non-negative integer.")
 
     if mode == "qpcr":
         if args.probe_ambiguity is None:
             raise RuntimeError("Probe ambiguity (-pa) is required for qPCR mode.")
-        if args.probe_ambiguity < 0:
-            raise ValueError("--probe-ambiguity cannot be negative.")
+        if not isinstance(args.probe_ambiguity, int) or args.probe_ambiguity < 0:
+            raise ValueError("--probe-ambiguity must be a non-negative integer.")
+
+        if args.qpcr_test_n is not None:
+            if not isinstance(args.qpcr_test_n, int) or args.qpcr_test_n <= 0:
+                raise ValueError("--qpcr-test-n must be a positive integer.")
+
+        if args.qpcr_deltag is not None and not isinstance(args.qpcr_deltag, int):
+            raise ValueError(
+                "--qpcr-deltag must be an integer, for example -3 (not -3.0)."
+            )
 
     if mode == "single":
+        for name, value in (
+            ("--single-opt-length", args.single_opt_length),
+            ("--single-max-length", args.single_max_length),
+        ):
+            if value is not None and (
+                not isinstance(value, int) or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer.")
+
         if (
             args.single_opt_length is not None
             and args.single_max_length is not None
@@ -2027,8 +2698,9 @@ def validate_varvamp_mode_parameters(args: argparse.Namespace, mode: str) -> Non
             raise ValueError(
                 "--single-max-length must be >= --single-opt-length."
             )
+
         if args.single_report_n is not None:
-            if args.single_report_n.lower() != "inf":
+            if str(args.single_report_n).lower() != "inf":
                 try:
                     report_n = int(args.single_report_n)
                 except ValueError as error:
@@ -2041,6 +2713,15 @@ def validate_varvamp_mode_parameters(args: argparse.Namespace, mode: str) -> Non
                     )
 
     if mode == "tiled":
+        for name, value in (
+            ("--tiled-opt-length", args.tiled_opt_length),
+            ("--tiled-max-length", args.tiled_max_length),
+        ):
+            if value is not None and (
+                not isinstance(value, int) or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer.")
+
         if (
             args.tiled_opt_length is not None
             and args.tiled_max_length is not None
@@ -2049,11 +2730,306 @@ def validate_varvamp_mode_parameters(args: argparse.Namespace, mode: str) -> Non
             raise ValueError(
                 "--tiled-max-length must be >= --tiled-opt-length."
             )
-        if args.tiled_overlap is not None and args.tiled_overlap < 0:
-            raise ValueError("--tiled-overlap cannot be negative.")
 
-    if args.qpcr_test_n is not None and args.qpcr_test_n <= 0:
-        raise ValueError("--qpcr-test-n must be greater than zero.")
+        if args.tiled_overlap is not None and (
+            not isinstance(args.tiled_overlap, int)
+            or args.tiled_overlap < 0
+        ):
+            raise ValueError("--tiled-overlap must be a non-negative integer.")
+
+    if args.varvamp_config is not None:
+        validate_custom_varvamp_config(
+            args.varvamp_config.expanduser().resolve(),
+            mode,
+        )
+
+
+def run_varvamp_command(
+    command: list[str],
+    *,
+    env: dict[str, str],
+) -> tuple[int, str]:
+    """
+    Run VarVAMP while streaming its combined stdout/stderr to the terminal.
+
+    Unlike run_command(), a non-zero return code is returned to the caller so
+    interactive mode can adjust parameters and retry VarVAMP without restarting
+    orientation, MARS, clustering, MAFFT, trimming or conservation analysis.
+    """
+    command_text = " ".join(command)
+    log_line("COMMAND: " + command_text)
+
+    if VERBOSE:
+        print("\nCommand:", command_text)
+
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+    except OSError as error:
+        raise RuntimeError(
+            "Could not start VarVAMP command: " + command_text
+        ) from error
+
+    output_lines: list[str] = []
+    assert process.stdout is not None
+
+    for line in process.stdout:
+        output_lines.append(line)
+        print(line, end="")
+        log_line("VARVAMP: " + line.rstrip())
+
+    return_code = process.wait()
+    return return_code, "".join(output_lines)
+
+
+def parse_varvamp_diagnostics(output: str) -> dict[str, object]:
+    """Extract useful counts and the reported error from VarVAMP terminal output."""
+    diagnostics: dict[str, object] = {}
+
+    patterns = {
+        "forward_primers": r"(\d+)\s+fw\s+and\s+\d+\s+rv potential primers",
+        "reverse_primers": r"\d+\s+fw\s+and\s+(\d+)\s+rv potential primers",
+        "potential_probes": r"(\d+)\s+potential qPCR probes",
+        "unique_qpcr_amplicons": r"(\d+)\s+unique amplicons with internal probe",
+        "delta_g_schemes": (
+            r"(\d+)\s+non-overlapping qPCR schemes that passed deltaG cutoff"
+        ),
+    }
+
+    for key, pattern in patterns.items():
+        matches = re.findall(pattern, output, flags=re.IGNORECASE)
+        if matches:
+            diagnostics[key] = int(matches[-1])
+
+    error_lines = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("ERROR:"):
+            error_lines.append(stripped[6:].strip())
+
+    if error_lines:
+        diagnostics["reason"] = error_lines[-1]
+    else:
+        nonempty = [line.strip() for line in output.splitlines() if line.strip()]
+        diagnostics["reason"] = (
+            nonempty[-1] if nonempty else "VarVAMP exited with a non-zero status."
+        )
+
+    return diagnostics
+
+
+def print_varvamp_failure(
+    args: argparse.Namespace,
+    mode: str,
+    diagnostics: dict[str, object],
+) -> None:
+    """Display a mode-aware failure summary before offering a retry."""
+    title = f"VarVAMP did not produce a {mode.upper()} scheme"
+    print("\n" + title)
+    print("=" * len(title))
+    print("\nReason reported by VarVAMP:")
+    print(str(diagnostics.get("reason", "Unknown VarVAMP error.")))
+
+    print("\nCurrent parameters:")
+    print(f"  Mode                 : {mode.upper()}")
+    print(f"  Consensus threshold  : {args.varvamp_threshold}")
+    print(f"  Primer ambiguity     : {args.primer_ambiguity}")
+    if mode == "qpcr":
+        print(f"  Probe ambiguity      : {args.probe_ambiguity}")
+        if args.qpcr_test_n is not None:
+            print(f"  qPCR test count (-n) : {args.qpcr_test_n}")
+        if args.qpcr_deltag is not None:
+            print(f"  deltaG cutoff (-d)   : {args.qpcr_deltag}")
+
+    if mode == "qpcr" and any(
+        key in diagnostics
+        for key in (
+            "forward_primers",
+            "reverse_primers",
+            "potential_probes",
+            "unique_qpcr_amplicons",
+            "delta_g_schemes",
+        )
+    ):
+        print("\nVarVAMP nevertheless found:")
+        if "forward_primers" in diagnostics:
+            print(f"  Forward primers      : {diagnostics['forward_primers']}")
+        if "reverse_primers" in diagnostics:
+            print(f"  Reverse primers      : {diagnostics['reverse_primers']}")
+        if "potential_probes" in diagnostics:
+            print(f"  Potential probes     : {diagnostics['potential_probes']}")
+        if "unique_qpcr_amplicons" in diagnostics:
+            print(
+                "  Probe-containing amps : "
+                f"{diagnostics['unique_qpcr_amplicons']}"
+            )
+        if "delta_g_schemes" in diagnostics:
+            print(f"  deltaG-passing schemes: {diagnostics['delta_g_schemes']}")
+
+    print("\nPossible adjustment:")
+    print("  - lower or otherwise adjust consensus threshold (-t)")
+    print("  - increase primer ambiguity (-a)")
+    if mode == "qpcr":
+        print("  - increase probe ambiguity (-pa)")
+    print("  - change mode-specific parameters or use a custom config")
+
+
+def ensure_mode_required_interactive_parameters(
+    args: argparse.Namespace,
+    mode: str,
+) -> None:
+    """Collect required parameters after switching VarVAMP mode."""
+    if mode == "qpcr" and args.probe_ambiguity is None:
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "--probe-ambiguity is required for qPCR mode "
+                "in non-interactive execution."
+            )
+        args.probe_ambiguity = ask_required_non_negative_integer(
+            "Maximum ambiguous bases in the probe",
+            "-pa",
+        )
+
+
+def adjust_varvamp_after_failure(
+    args: argparse.Namespace,
+    mode: str,
+    results_dir: Path,
+) -> str:
+    """
+    Adjust parameters after a failed VarVAMP attempt.
+
+    Returns:
+        "retry"       retry VarVAMP
+        "mode_changed" retry after changing mode
+        "stop"        stop VarVAMP design
+    """
+    if mode == "qpcr":
+        choices = [
+            ("threshold", "Change consensus threshold (-t)."),
+            ("primer", "Change primer ambiguity (-a)."),
+            ("probe", "Change probe ambiguity (-pa)."),
+            ("several", "Change several VarVAMP parameters."),
+            ("advanced", "Configure advanced qPCR parameters (Python config)."),
+            ("mode", "Change VarVAMP assay mode."),
+            ("stop", "Stop the workflow."),
+        ]
+    else:
+        choices = [
+            ("threshold", "Change consensus threshold (-t)."),
+            ("primer", "Change primer ambiguity (-a)."),
+            (
+                "mode_cli",
+                f"Change additional {mode.upper()} command-line parameters.",
+            ),
+            ("several", "Change several VarVAMP parameters."),
+            (
+                "advanced",
+                f"Configure advanced {mode.upper()} parameters (Python config).",
+            ),
+            ("mode", "Change VarVAMP assay mode."),
+            ("stop", "Stop the workflow."),
+        ]
+
+    choice = ask_required_choice("What would you like to do?", choices)
+
+    if choice == "threshold":
+        args.varvamp_threshold = ask_required_float(
+            "VarVAMP consensus threshold",
+            "-t",
+            minimum=0.01,
+            maximum=1.0,
+        )
+        return "retry"
+
+    if choice == "primer":
+        args.primer_ambiguity = ask_required_non_negative_integer(
+            "Maximum ambiguous bases in each primer",
+            "-a",
+        )
+        return "retry"
+
+    if choice == "probe":
+        args.probe_ambiguity = ask_required_non_negative_integer(
+            "Maximum ambiguous bases in the probe",
+            "-pa",
+        )
+        return "retry"
+
+    if choice == "mode_cli":
+        configure_interactive_varvamp_advanced(
+            args,
+            mode,
+            force=True,
+        )
+        return "retry"
+
+    if choice == "several":
+        args.varvamp_threshold = ask_required_float(
+            "VarVAMP consensus threshold",
+            "-t",
+            minimum=0.01,
+            maximum=1.0,
+        )
+        args.primer_ambiguity = ask_required_non_negative_integer(
+            "Maximum ambiguous bases in each primer",
+            "-a",
+        )
+        if mode == "qpcr":
+            args.probe_ambiguity = ask_required_non_negative_integer(
+                "Maximum ambiguous bases in the probe",
+                "-pa",
+            )
+        if ask_yes_no(
+            "Also configure additional mode-specific command-line parameters?"
+        ):
+            configure_interactive_varvamp_advanced(
+                args,
+                mode,
+                force=True,
+            )
+        return "retry"
+
+    if choice == "advanced":
+        changed = configure_custom_varvamp_file(
+            args,
+            mode,
+            results_dir,
+        )
+        if changed:
+            return "retry"
+        return adjust_varvamp_after_failure(
+            args,
+            mode,
+            results_dir,
+        )
+
+    if choice == "mode":
+        args.varvamp_mode = choose_varvamp_mode()
+        # A mode change returns to VarVAMP's normal/default Python config unless
+        # the user explicitly selects a custom config again.
+        args.varvamp_config = None
+        ensure_mode_required_interactive_parameters(
+            args,
+            args.varvamp_mode,
+        )
+        if ask_yes_no(
+            "Configure additional mode-specific VarVAMP parameters for the new mode?"
+        ):
+            configure_interactive_varvamp_advanced(
+                args,
+                args.varvamp_mode,
+                force=True,
+            )
+        return "mode_changed"
+
+    return "stop"
 
 
 def copy_varvamp_tree(varvamp_dir: Path, results_dir: Path, mode: str) -> Path:
@@ -2122,46 +3098,93 @@ def save_pdf_first_page_as_png(
 
 def print_varvamp_tables(varvamp_results_dir: Path, mode: str) -> None:
     """
-    Summarize principal VarVAMP tables.
+    Display VarVAMP text results directly in the terminal after a successful run.
 
-    Normal mode shows row counts only; --verbose prints the complete tables.
+    PDF and image files are intentionally excluded. Text-based scientific output
+    such as TSV, TABULAR, BED, CSV, TXT and FASTA is displayed.
     """
-    if mode == "qpcr":
-        tables = [
-            ("qpcr_primers.tsv", "qPCR primers/probes", "\t"),
-            ("qpcr_design.tsv", "qPCR designs", "\t"),
-        ]
-    else:
-        tables = [
-            ("primer.tsv", "Primers", "\t"),
-            (
-                "primer_to_amplicon_assignments.tabular",
-                "Primer-to-amplicon assignments",
-                "\t",
-            ),
-        ]
+    text_extensions = {
+        ".tsv",
+        ".tabular",
+        ".bed",
+        ".txt",
+        ".csv",
+        ".fasta",
+        ".fa",
+        ".fna",
+    }
 
-    section("VarVAMP output summary")
+    preferred_by_mode = {
+        "qpcr": [
+            "qpcr_primers.tsv",
+            "qpcr_design.tsv",
+            "oligos.fasta",
+            "primers.bed",
+            "amplicons.bed",
+        ],
+        "single": [
+            "primer.tsv",
+            "primer_to_amplicon_assignments.tabular",
+            "primers.bed",
+            "amplicons.bed",
+        ],
+        "tiled": [
+            "primer.tsv",
+            "primer_to_amplicon_assignments.tabular",
+            "primers.bed",
+            "amplicons.bed",
+        ],
+    }
 
-    for filename, label, separator in tables:
-        path = varvamp_results_dir / filename
-        if not path.is_file():
-            continue
+    files = [
+        path
+        for path in varvamp_results_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in text_extensions
+    ]
+
+    preferred_names = preferred_by_mode.get(mode, [])
+    preferred_rank = {
+        name: index
+        for index, name in enumerate(preferred_names)
+    }
+
+    files.sort(
+        key=lambda path: (
+            preferred_rank.get(path.name, len(preferred_rank) + 1),
+            str(path.relative_to(varvamp_results_dir)),
+        )
+    )
+
+    section(f"VarVAMP {mode.upper()} text results")
+
+    if not files:
+        print("No terminal-readable VarVAMP result files were found.")
+        print(f"Result directory: {compact_path(varvamp_results_dir)}")
+        return
+
+    for path in files:
+        relative = path.relative_to(varvamp_results_dir)
+        title = str(relative)
+        print(f"\n{title}")
+        print("-" * len(title))
 
         try:
-            table = pd.read_csv(path, sep=separator)
-        except (pd.errors.ParserError, pd.errors.EmptyDataError):
-            print(f"{label:<32}: present")
+            content = path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).rstrip()
+        except OSError as error:
+            print(f"[Could not read file: {error}]")
             continue
 
-        print(f"{label:<32}: {len(table)} rows")
+        if content:
+            print(content)
+        else:
+            print("[empty file]")
 
-        if VERBOSE:
-            print()
-            print(table.to_string(index=False))
-            print()
-
-    print(f"Result directory               : {compact_path(varvamp_results_dir)}")
+    print(
+        f"\nResult directory: {compact_path(varvamp_results_dir)}"
+    )
 
 
 def create_varvamp_visual_summaries(varvamp_results_dir: Path) -> None:
@@ -2250,43 +3273,54 @@ def main() -> int:
 
         interactive = sys.stdin.isatty()
 
-        # Interactive scientific choices are intentionally collected step by step.
-        # Each tool is configured immediately before it is executed, instead of
-        # asking for all workflow parameters at startup. Command-line values still
-        # bypass the corresponding interactive question.
+        if not interactive and args.trimming is None:
+            raise RuntimeError(
+                "--trimming is required in non-interactive mode."
+            )
 
-        # Manual trimAl parameters may be supplied in advance in non-interactive
-        # mode, but interactive trimming remains deliberately deferred until after
-        # alignment QC statistics have been displayed.
-        if args.trimming == "manual" and args.trimal_gap_threshold is None and not interactive:
+        if (
+            args.trimming == "manual"
+            and args.trimal_gap_threshold is None
+            and not interactive
+        ):
             raise RuntimeError(
                 "--trimal-gap-threshold is required for --trimming manual."
             )
 
         # ------------------------------------------------------------------
-        # 1. Orientation normalization
+        # Input overview
         # ------------------------------------------------------------------
         current_fasta = input_file
         initial_count = count_fasta_sequences(input_file)
 
-        print("\n1. Sequence orientation checkpoint")
         print_fasta_statistics(
-            calculate_fasta_statistics(current_fasta),
-            title="Pre-orientation dataset statistics",
+            calculate_fasta_statistics(input_file),
+            title="Input dataset statistics",
         )
+
+        # ------------------------------------------------------------------
+        # 1. Orientation normalization
+        # ------------------------------------------------------------------
+        print("\n1. Sequence orientation checkpoint")
 
         if args.orientation is None:
             if not interactive:
-                raise RuntimeError("--orientation is required in non-interactive mode.")
+                raise RuntimeError(
+                    "--orientation is required in non-interactive mode."
+                )
             args.orientation = choose_orientation_strategy()
 
         if args.orientation not in {"keep", "adjust", "accurate"}:
             raise ValueError("Unsupported orientation strategy.")
 
         reversed_count = 0
+
         if args.orientation == "keep":
-            print("Sequence orientation will be kept as provided.")
-            print("Orientation changes:           0 (orientation check skipped)")
+            section("Orientation result")
+            print("Method                    : keep original orientation")
+            print("MAFFT orientation check   : skipped")
+            print(f"Sequences retained        : {initial_count}")
+            print("Sequences changed         : 0")
         else:
             check_required_tools([("MAFFT", args.mafft_executable)])
             print("Running sequence orientation normalization with MAFFT.")
@@ -2298,32 +3332,35 @@ def main() -> int:
                 args.threads,
                 args.mafft_executable,
             )
-            print("\nOrientation result")
-            print("==================")
-            print(f"Sequences checked:             {initial_count}")
+
+            section("Orientation result")
             print(
-                f"Reverse-complemented:           {reversed_count} "
+                "Method                    : "
+                + (
+                    "MAFFT --adjustdirection"
+                    if args.orientation == "adjust"
+                    else "MAFFT --adjustdirectionaccurately"
+                )
+            )
+            print(f"Sequences checked         : {initial_count}")
+            print(
+                f"Reverse-complemented      : {reversed_count} "
                 f"({100.0 * reversed_count / initial_count if initial_count else 0.0:.2f} %)"
             )
-            print(f"Orientation unchanged:         {initial_count - reversed_count}")
-
-        print_fasta_statistics(
-            calculate_fasta_statistics(current_fasta),
-            title="Post-orientation dataset statistics",
-        )
+            print(
+                f"Orientation unchanged     : {initial_count - reversed_count}"
+            )
 
         # ------------------------------------------------------------------
         # 2. Circular start-position normalization
         # ------------------------------------------------------------------
         print("\n2. Sequence topology checkpoint")
-        print_fasta_statistics(
-            calculate_fasta_statistics(current_fasta),
-            title="Pre-topology-normalization dataset statistics",
-        )
 
         if args.topology is None:
             if not interactive:
-                raise RuntimeError("--topology is required in non-interactive mode.")
+                raise RuntimeError(
+                    "--topology is required in non-interactive mode."
+                )
             args.topology = choose_sequence_topology()
 
         if args.topology == "circular":
@@ -2337,51 +3374,57 @@ def main() -> int:
                 args.mars_executable,
             )
             print_rotation_statistics(
-                calculate_cyclic_rotation_statistics(before_mars, current_fasta)
+                calculate_cyclic_rotation_statistics(
+                    before_mars,
+                    current_fasta,
+                )
             )
         elif args.topology == "linear":
-            print("Circular start-position normalization skipped (linear sequences).")
-            print("Cyclic start positions changed: 0 (MARS not applicable)")
+            section("Topology result")
+            print("Topology                  : linear")
+            print("MARS                      : not applicable")
+            print("Cyclic starts changed     : 0")
         else:
             raise ValueError("--topology must be 'linear' or 'circular'.")
-
-        print_fasta_statistics(
-            calculate_fasta_statistics(current_fasta),
-            title="Post-topology-normalization dataset statistics",
-        )
 
         # ------------------------------------------------------------------
         # 3. Redundancy handling
         # ------------------------------------------------------------------
         print("\n3. Sequence redundancy checkpoint")
-        print_fasta_statistics(
-            calculate_fasta_statistics(current_fasta),
-            title="Pre-redundancy dataset statistics",
-        )
+
         if args.redundancy is None:
             if args.skip_cdhit:
                 args.redundancy = "none"
             elif not interactive:
-                raise RuntimeError("--redundancy is required in non-interactive mode.")
+                raise RuntimeError(
+                    "--redundancy is required in non-interactive mode."
+                )
             else:
                 args.redundancy = choose_redundancy_strategy()
 
         if args.redundancy == "cdhit":
             if args.identity is None:
                 if not interactive:
-                    raise RuntimeError("--identity is required for CD-HIT-EST.")
+                    raise RuntimeError(
+                        "--identity is required for CD-HIT-EST."
+                    )
                 args.identity = ask_required_float(
                     "CD-HIT-EST identity threshold",
                     "-c",
-                    minimum=0.75,
+                    minimum=0.80,
                     maximum=1.0,
                 )
-            if not 0.75 <= args.identity <= 1.0:
-                raise ValueError("--identity must be between 0.75 and 1.0.")
+
+            if not 0.80 <= args.identity <= 1.0:
+                raise ValueError(
+                    "--identity must be between 0.80 and 1.0."
+                )
 
             if args.cdhit_mode is None:
                 if not interactive:
-                    raise RuntimeError("--cdhit-mode is required for CD-HIT-EST.")
+                    raise RuntimeError(
+                        "--cdhit-mode is required for CD-HIT-EST."
+                    )
                 args.cdhit_mode = ask_required_choice(
                     "CD-HIT-EST clustering mode",
                     [
@@ -2398,21 +3441,31 @@ def main() -> int:
 
             if args.cdhit_strand is None:
                 if not interactive:
-                    raise RuntimeError("--cdhit-strand is required for CD-HIT-EST.")
+                    raise RuntimeError(
+                        "--cdhit-strand is required for CD-HIT-EST."
+                    )
                 args.cdhit_strand = ask_required_choice(
                     "CD-HIT-EST strand comparison",
                     [
-                        ("both", "Compare both +/+ and +/- orientations (-r 1)."),
-                        ("same", "Compare only the same orientation, +/+ (-r 0)."),
+                        (
+                            "both",
+                            "Compare both +/+ and +/- orientations (-r 1).",
+                        ),
+                        (
+                            "same",
+                            "Compare only the same orientation, +/+ (-r 0).",
+                        ),
                     ],
                 )
 
-        redundancy_output = workdir / f"{project_name}_redundancy_filtered.fasta"
+        redundancy_output = (
+            workdir / f"{project_name}_redundancy_filtered.fasta"
+        )
         before_redundancy = count_fasta_sequences(current_fasta)
+        word_size: int | None = None
 
         if args.redundancy == "none":
             shutil.copy2(current_fasta, redundancy_output)
-            print("No redundancy reduction selected.")
 
         elif args.redundancy == "seqkit":
             check_required_tools([("SeqKit", args.seqkit_executable)])
@@ -2424,7 +3477,9 @@ def main() -> int:
             )
 
         elif args.redundancy == "cdhit":
-            check_required_tools([("CD-HIT-EST", args.cdhit_executable)])
+            check_required_tools(
+                [("CD-HIT-EST", args.cdhit_executable)]
+            )
             print("Running sequence clustering with CD-HIT-EST.")
             word_size = run_cdhit_clustering(
                 current_fasta,
@@ -2435,10 +3490,11 @@ def main() -> int:
                 threads=args.threads,
                 cdhit_executable=args.cdhit_executable,
             )
-            print(f"Automatically selected CD-HIT-EST word size: {word_size}")
 
         else:
-            raise RuntimeError(f"Unknown redundancy strategy: {args.redundancy}")
+            raise RuntimeError(
+                f"Unknown redundancy strategy: {args.redundancy}"
+            )
 
         after_redundancy = count_fasta_sequences(redundancy_output)
         removed_redundancy = before_redundancy - after_redundancy
@@ -2452,24 +3508,44 @@ def main() -> int:
             if before_redundancy
             else 0.0
         )
-        print("\nRedundancy reduction statistics")
-        print("===============================")
-        print(f"Strategy:                       {args.redundancy}")
-        print(f"Sequences before:               {before_redundancy}")
-        print(f"Sequences removed:              {removed_redundancy} ({reduction:.2f} %)")
-        print(f"Sequences retained:             {after_redundancy} ({retained_percentage:.2f} %)")
-        if args.redundancy == "cdhit":
-            print(f"CD-HIT-EST cluster representatives: {after_redundancy}")
 
-        print_fasta_statistics(
-            calculate_fasta_statistics(redundancy_output),
-            title="Post-redundancy dataset statistics",
+        section("Redundancy reduction result")
+        print(f"Strategy                  : {args.redundancy}")
+        if args.redundancy == "seqkit":
+            print("Matching criterion         : exact sequence identity")
+        elif args.redundancy == "cdhit":
+            print(f"Identity threshold (-c)    : {args.identity}")
+            print(f"Word size (-n)             : {word_size}")
+            print(
+                "Clustering mode (-g)       : "
+                f"{args.cdhit_mode} "
+                f"({'1' if args.cdhit_mode == 'accurate' else '0'})"
+            )
+            print(
+                "Strand comparison (-r)     : "
+                f"{args.cdhit_strand} "
+                f"({'1' if args.cdhit_strand == 'both' else '0'})"
+            )
+
+        print(f"Sequences before          : {before_redundancy}")
+        print(
+            f"Sequences removed         : {removed_redundancy} "
+            f"({reduction:.2f} %)"
         )
+        print(
+            f"Sequences retained        : {after_redundancy} "
+            f"({retained_percentage:.2f} %)"
+        )
+        if args.redundancy == "cdhit":
+            print(
+                f"Cluster representatives   : {after_redundancy}"
+            )
 
         # ------------------------------------------------------------------
         # 4. Final MAFFT multiple sequence alignment
         # ------------------------------------------------------------------
         print("\n4. Final MAFFT alignment checkpoint")
+
         if args.mafft_strategy is None:
             if not interactive:
                 raise RuntimeError(
@@ -2478,15 +3554,21 @@ def main() -> int:
             args.mafft_strategy = choose_mafft_strategy()
 
         if args.mafft_strategy not in MAFFT_STRATEGIES:
-            raise ValueError(f"Unsupported MAFFT strategy: {args.mafft_strategy}")
+            raise ValueError(
+                f"Unsupported MAFFT strategy: {args.mafft_strategy}"
+            )
 
         if interactive:
-            warn_about_mafft_strategy(args.mafft_strategy, after_redundancy)
+            warn_about_mafft_strategy(
+                args.mafft_strategy,
+                after_redundancy,
+            )
 
         check_required_tools([("MAFFT", args.mafft_executable)])
         final_alignment = workdir / f"{project_name}_alignment.fasta"
+
         print(f"Running final MAFFT alignment: {args.mafft_strategy}")
-        run_final_mafft(
+        mafft_reported_strategy = run_final_mafft(
             redundancy_output,
             final_alignment,
             args.mafft_strategy,
@@ -2494,18 +3576,38 @@ def main() -> int:
             args.mafft_executable,
         )
         read_alignment(final_alignment)
+
         shutil.copy2(
             final_alignment,
             results_dir / f"{project_name}_alignment.fasta",
+        )
+
+        pretrim_stats, pretrim_sequences = calculate_alignment_statistics(
+            final_alignment
+        )
+
+        section("MAFFT alignment result")
+        print(f"Sequences aligned         : {after_redundancy}")
+        print(f"Requested strategy        : {args.mafft_strategy}")
+        print(f"MAFFT reported strategy   : {mafft_reported_strategy}")
+        print(
+            f"Alignment length          : "
+            f"{int(pretrim_stats['alignment_length'])} positions"
+        )
+        print(
+            f"Mean gap content          : "
+            f"{float(pretrim_stats['mean_gap_content_percent']):.2f} %"
+        )
+        print(
+            f"Fully occupied columns    : "
+            f"{int(pretrim_stats['fully_occupied_columns'])}"
         )
 
         # ------------------------------------------------------------------
         # 5. Alignment QC and trimming checkpoint
         # ------------------------------------------------------------------
         print("\n5. Alignment QC and trimming checkpoint")
-        pretrim_stats, pretrim_sequences = calculate_alignment_statistics(
-            final_alignment
-        )
+
         print_alignment_statistics(pretrim_stats)
         save_alignment_statistics(
             pretrim_stats,
@@ -2516,16 +3618,18 @@ def main() -> int:
         )
 
         if args.trimming is None:
-            # Only possible in interactive mode; non-interactive mode was checked.
             args.trimming = choose_trimming_strategy()
 
-        if args.trimming == "manual" and args.trimal_gap_threshold is None:
+        if (
+            args.trimming == "manual"
+            and args.trimal_gap_threshold is None
+        ):
             print("\nManual trimAl gap threshold")
             print("============================")
             print(
-                "The -gt value is the minimum fraction of sequences without a gap "
-                "in a retained column. Examples: 0.90 = >=90% occupancy; "
-                "1.00 = no gaps allowed; 0.01 is extremely permissive."
+                "The -gt value is the minimum fraction of sequences without "
+                "a gap in a retained column. Examples: 0.90 = >=90% "
+                "occupancy; 1.00 = no gaps allowed."
             )
             args.trimal_gap_threshold = ask_required_float(
                 "trimAl gap threshold",
@@ -2533,21 +3637,29 @@ def main() -> int:
                 minimum=0.0,
                 maximum=1.0,
             )
+
             if args.trimal_gap_threshold < 0.50:
                 print(
-                    "Warning: this is a permissive threshold; many highly gapped "
-                    "columns may be retained."
+                    "Warning: this is a permissive threshold; many highly "
+                    "gapped columns may be retained."
                 )
                 if not ask_yes_no(
                     f"Continue with -gt {args.trimal_gap_threshold}?"
                 ):
-                    raise RuntimeError("Manual trimAl threshold rejected by user.")
+                    raise RuntimeError(
+                        "Manual trimAl threshold rejected by user."
+                    )
 
         downstream_alignment = final_alignment
 
         if args.trimming != "none":
-            check_required_tools([("trimAl", args.trimal_executable)])
-            trimmed_alignment = workdir / f"{project_name}_alignment_trimmed.fasta"
+            check_required_tools(
+                [("trimAl", args.trimal_executable)]
+            )
+            trimmed_alignment = (
+                workdir / f"{project_name}_alignment_trimmed.fasta"
+            )
+
             print(f"\nRunning trimAl strategy: {args.trimming}")
             run_trimal(
                 final_alignment,
@@ -2560,16 +3672,14 @@ def main() -> int:
 
             shutil.copy2(
                 trimmed_alignment,
-                results_dir / f"{project_name}_alignment_trimmed.fasta",
+                results_dir
+                / f"{project_name}_alignment_trimmed.fasta",
             )
 
-            posttrim_stats, posttrim_sequences = calculate_alignment_statistics(
-                trimmed_alignment
+            posttrim_stats, posttrim_sequences = (
+                calculate_alignment_statistics(trimmed_alignment)
             )
-            print_alignment_statistics(
-                posttrim_stats,
-                title="Post-trimming alignment statistics",
-            )
+
             save_alignment_statistics(
                 posttrim_stats,
                 posttrim_sequences,
@@ -2580,12 +3690,38 @@ def main() -> int:
 
             original_length = int(pretrim_stats["alignment_length"])
             trimmed_length = int(posttrim_stats["alignment_length"])
+            removed_columns = original_length - trimmed_length
+
+            section("trimAl effect")
+            print(f"Strategy                  : {args.trimming}")
+            if args.trimming == "manual":
+                print(
+                    f"Gap threshold (-gt)       : "
+                    f"{args.trimal_gap_threshold}"
+                )
+            print(f"Columns before            : {original_length}")
+            print(f"Columns after             : {trimmed_length}")
             print(
-                f"Columns removed by trimming: {original_length - trimmed_length} "
-                f"({100.0 * (original_length - trimmed_length) / original_length:.2f} %)"
+                f"Columns removed           : {removed_columns} "
+                f"({100.0 * removed_columns / original_length:.2f} %)"
+            )
+            print(
+                f"Mean gap content before   : "
+                f"{float(pretrim_stats['mean_gap_content_percent']):.2f} %"
+            )
+            print(
+                f"Mean gap content after    : "
+                f"{float(posttrim_stats['mean_gap_content_percent']):.2f} %"
+            )
+
+            print_alignment_statistics(
+                posttrim_stats,
+                title="Post-trimming alignment statistics",
             )
         else:
-            print("Keeping the complete final MAFFT alignment.")
+            section("trimAl result")
+            print("Trimming                  : skipped")
+            print("Alignment used downstream : complete MAFFT alignment")
 
         # ------------------------------------------------------------------
         # 6. Conservation analysis
@@ -2600,9 +3736,10 @@ def main() -> int:
         )
 
         # ------------------------------------------------------------------
-        # 7. VarVAMP assay design
+        # 7. VarVAMP assay design with retry-on-failure
         # ------------------------------------------------------------------
         varvamp_results: Path | None = None
+        varvamp_attempts: list[dict[str, object]] = []
 
         if not args.skip_varvamp:
             print("\n7. VarVAMP assay design checkpoint")
@@ -2616,7 +3753,9 @@ def main() -> int:
 
             if args.varvamp_threshold is None:
                 if not interactive:
-                    raise RuntimeError("--varvamp-threshold is required.")
+                    raise RuntimeError(
+                        "--varvamp-threshold is required."
+                    )
                 args.varvamp_threshold = ask_required_float(
                     "VarVAMP consensus threshold",
                     "-t",
@@ -2626,57 +3765,207 @@ def main() -> int:
 
             if args.primer_ambiguity is None:
                 if not interactive:
-                    raise RuntimeError("--primer-ambiguity is required.")
-                args.primer_ambiguity = ask_required_non_negative_integer(
-                    "Maximum ambiguous bases in each primer",
-                    "-a",
-                )
-
-            if args.varvamp_mode == "qpcr" and args.probe_ambiguity is None:
-                if not interactive:
                     raise RuntimeError(
-                        "--probe-ambiguity is required for qPCR mode."
+                        "--primer-ambiguity is required."
                     )
-                args.probe_ambiguity = ask_required_non_negative_integer(
-                    "Maximum ambiguous bases in the probe",
-                    "-pa",
+                args.primer_ambiguity = (
+                    ask_required_non_negative_integer(
+                        "Maximum ambiguous bases in each primer",
+                        "-a",
+                    )
                 )
 
-            if interactive:
-                configure_interactive_varvamp_advanced(args, args.varvamp_mode)
-
-            validate_varvamp_mode_parameters(args, args.varvamp_mode)
-            check_required_tools([("VarVAMP", args.varvamp_executable)])
-            print(f"Running assay design with VarVAMP ({args.varvamp_mode}).")
-
-            varvamp_workdir = workdir / f"{project_name}_varvamp_{args.varvamp_mode}"
-            if varvamp_workdir.exists():
-                shutil.rmtree(varvamp_workdir)
-
-            command = build_varvamp_command(
+            ensure_mode_required_interactive_parameters(
                 args,
                 args.varvamp_mode,
-                downstream_alignment,
-                varvamp_workdir,
             )
 
-            command_env = os.environ.copy()
-            if args.varvamp_config is not None:
-                config_path = args.varvamp_config.expanduser().resolve()
-                if not config_path.is_file():
-                    raise FileNotFoundError(
-                        f"VarVAMP config file not found: {config_path}"
+            if interactive:
+                configure_interactive_varvamp_advanced(
+                    args,
+                    args.varvamp_mode,
+                )
+
+            check_required_tools(
+                [("VarVAMP", args.varvamp_executable)]
+            )
+
+            attempt_number = 0
+
+            while True:
+                attempt_number += 1
+                mode = args.varvamp_mode
+
+                ensure_mode_required_interactive_parameters(
+                    args,
+                    mode,
+                )
+                validate_varvamp_mode_parameters(args, mode)
+
+                varvamp_workdir = (
+                    workdir / f"{project_name}_varvamp_{mode}"
+                )
+                if varvamp_workdir.exists():
+                    shutil.rmtree(varvamp_workdir)
+
+                command = build_varvamp_command(
+                    args,
+                    mode,
+                    downstream_alignment,
+                    varvamp_workdir,
+                )
+
+                command_env = os.environ.copy()
+
+                # Every new script execution starts with VarVAMP's normal
+                # configuration unless a custom config is explicitly selected.
+                command_env.pop("VARVAMP_CONFIG", None)
+
+                config_path: Path | None = None
+                if args.varvamp_config is not None:
+                    config_path = (
+                        args.varvamp_config.expanduser().resolve()
                     )
-                command_env["VARVAMP_CONFIG"] = str(config_path)
+                    validate_custom_varvamp_config(
+                        config_path,
+                        mode,
+                    )
+                    command_env["VARVAMP_CONFIG"] = str(config_path)
 
-            run_command(command, env=command_env)
-            varvamp_results = copy_varvamp_tree(
-                varvamp_workdir,
-                results_dir,
-                args.varvamp_mode,
-            )
-            print_varvamp_tables(varvamp_results, args.varvamp_mode)
-            create_varvamp_visual_summaries(varvamp_results)
+                section(f"VarVAMP attempt {attempt_number}")
+                print(f"Mode                      : {mode.upper()}")
+                print(
+                    f"Consensus threshold (-t)  : "
+                    f"{args.varvamp_threshold}"
+                )
+                print(
+                    f"Primer ambiguity (-a)     : "
+                    f"{args.primer_ambiguity}"
+                )
+                if mode == "qpcr":
+                    print(
+                        f"Probe ambiguity (-pa)     : "
+                        f"{args.probe_ambiguity}"
+                    )
+                print(
+                    "Python configuration      : "
+                    + (
+                        compact_path(config_path)
+                        if config_path is not None
+                        else "VarVAMP default"
+                    )
+                )
+
+                return_code, varvamp_output = run_varvamp_command(
+                    command,
+                    env=command_env,
+                )
+
+                diagnostics = parse_varvamp_diagnostics(
+                    varvamp_output
+                )
+
+                attempt_record: dict[str, object] = {
+                    "attempt": attempt_number,
+                    "mode": mode,
+                    "consensus_threshold": args.varvamp_threshold,
+                    "primer_ambiguity": args.primer_ambiguity,
+                    "probe_ambiguity": (
+                        args.probe_ambiguity
+                        if mode == "qpcr"
+                        else None
+                    ),
+                    "single_opt_length": args.single_opt_length,
+                    "single_max_length": args.single_max_length,
+                    "single_report_n": args.single_report_n,
+                    "tiled_opt_length": args.tiled_opt_length,
+                    "tiled_max_length": args.tiled_max_length,
+                    "tiled_overlap": args.tiled_overlap,
+                    "qpcr_test_n": args.qpcr_test_n,
+                    "qpcr_deltag": args.qpcr_deltag,
+                    "custom_config": (
+                        str(config_path)
+                        if config_path is not None
+                        else None
+                    ),
+                    "return_code": return_code,
+                    "status": (
+                        "success"
+                        if return_code == 0
+                        else "failed"
+                    ),
+                }
+
+                if return_code != 0:
+                    attempt_record["reason"] = diagnostics.get(
+                        "reason"
+                    )
+
+                varvamp_attempts.append(attempt_record)
+                log_line(
+                    "VARVAMP_ATTEMPT: "
+                    + json.dumps(
+                        attempt_record,
+                        sort_keys=True,
+                    )
+                )
+
+                if return_code == 0:
+                    varvamp_results = copy_varvamp_tree(
+                        varvamp_workdir,
+                        results_dir,
+                        mode,
+                    )
+                    print_varvamp_tables(
+                        varvamp_results,
+                        mode,
+                    )
+                    create_varvamp_visual_summaries(
+                        varvamp_results
+                    )
+                    break
+
+                if not interactive:
+                    raise RuntimeError(
+                        "VarVAMP failed in non-interactive mode: "
+                        + str(
+                            diagnostics.get(
+                                "reason",
+                                "unknown error",
+                            )
+                        )
+                    )
+
+                print_varvamp_failure(
+                    args,
+                    mode,
+                    diagnostics,
+                )
+
+                action = adjust_varvamp_after_failure(
+                    args,
+                    mode,
+                    results_dir,
+                )
+
+                if action == "stop":
+                    print(
+                        "VarVAMP design stopped by the user. "
+                        "Previous workflow steps remain saved."
+                    )
+                    args.skip_varvamp = True
+                    break
+
+                # "retry" and "mode_changed" both return here and rerun only
+                # the VarVAMP stage. All previous workflow products are reused.
+                print("\nRetrying VarVAMP only...")
+                print("Orientation              : already completed")
+                print("Topology normalization   : already completed")
+                print("Redundancy handling      : already completed")
+                print("Final MAFFT              : already completed")
+                print("trimAl / alignment QC    : already completed")
+                print("Conservation analysis    : already completed")
+
         else:
             print("\n7. VarVAMP assay design skipped")
 
@@ -2694,6 +3983,7 @@ def main() -> int:
             after_redundancy=after_redundancy,
             args=args,
             varvamp_results=varvamp_results,
+            varvamp_attempts=varvamp_attempts,
         )
 
         write_workflow_summary(
@@ -2708,26 +3998,49 @@ def main() -> int:
             varvamp_results=varvamp_results,
         )
 
-        # Put a copy of the design manifest inside the selected VarVAMP
-        # result directory so validation can identify the exact parent project.
         if varvamp_results is not None:
             shutil.copy2(
                 manifest_file,
-                varvamp_results / "assay_design_manifest.json",
+                varvamp_results
+                / "assay_design_manifest.json",
             )
 
         section("Workflow completed")
         print(f"Initial sequences        : {initial_count}")
-        print(f"Final MAFFT sequences    : {after_redundancy}")
-        print(f"Downstream alignment     : {compact_path(downstream_alignment)}")
+        print(
+            f"Final MAFFT sequences    : {after_redundancy}"
+        )
+        print(
+            f"Downstream alignment     : "
+            f"{compact_path(downstream_alignment)}"
+        )
+
         if varvamp_results is not None:
-            print(f"VarVAMP mode             : {args.varvamp_mode.upper()}")
-            print(f"VarVAMP results          : {compact_path(varvamp_results)}")
+            print(
+                f"VarVAMP mode             : "
+                f"{args.varvamp_mode.upper()}"
+            )
+            print(
+                f"VarVAMP results          : "
+                f"{compact_path(varvamp_results)}"
+            )
+        elif args.skip_varvamp:
+            print("VarVAMP                  : no final design")
         else:
             print("VarVAMP                  : skipped")
-        print(f"Project manifest         : {compact_path(manifest_file)}")
-        print(f"Workflow summary         : {compact_path(summary_file)}")
-        print(f"Workflow log             : {compact_path(WORKFLOW_LOG)}")
+
+        print(
+            f"Project manifest         : "
+            f"{compact_path(manifest_file)}"
+        )
+        print(
+            f"Workflow summary         : "
+            f"{compact_path(summary_file)}"
+        )
+        print(
+            f"Workflow log             : "
+            f"{compact_path(WORKFLOW_LOG)}"
+        )
         return 0
 
     except (
