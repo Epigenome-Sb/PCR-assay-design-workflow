@@ -15,4 +15,4 @@ in silico validation with MFEprimer and BLAST+.
 The validation dataset should ideally be larger and/or independent from the
 design dataset when possible.
 
-Large FASTA files are not intended to be committed to Git.
+Large FASTA files are not intended to be committed to Git..
