@@ -26,13 +26,22 @@ Scientific decisions remain stepwise and explicit in interactive mode.
 
 Normal terminal mode is concise.
 Use --verbose to display complete external commands and detailed tables.
-All commands are always recorded in results/<project>/workflow.log.
+All commands are recorded in the run-specific workflow log.
 
-The workflow writes:
-- workflow_summary.txt
-- workflow.log
-- assay_design_manifest.json
-and copies the manifest into the selected varvamp_<mode>/ result directory.
+Default storage architecture
+----------------------------
+Input design FASTA:
+    data/design/
+
+Temporary/reconstructible files:
+    work/<project>/design/<run_id>/
+
+Permanent scientific results:
+    results/<project>/design/<run_id>/
+
+Each run is isolated by a unique run_id so previous analyses are not
+overwritten. The run contains preprocessing, alignment, conservation,
+VarVAMP, configuration, manifest, summary and log outputs.
 """
 
 from __future__ import annotations
@@ -138,6 +147,7 @@ def write_project_manifest(
     path: Path,
     *,
     project_name: str,
+    run_id: str,
     input_file: Path,
     workdir: Path,
     results_dir: Path,
@@ -173,12 +183,27 @@ def write_project_manifest(
         selected_tools["varvamp"] = executable_version(args.varvamp_executable)
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_utc": datetime.now(timezone.utc).isoformat(),
+        "workflow_stage": "design",
         "project_name": project_name,
+        "run_id": run_id,
+        "input_role": "design_database",
         "input_fasta": str(input_file.resolve()),
+        "input_sha256": sha256_file(input_file),
         "workdir": str(workdir.resolve()),
         "results_dir": str(results_dir.resolve()),
+        "result_directories": {
+            "preprocessing": str((results_dir / "preprocessing").resolve()),
+            "alignment": str((results_dir / "alignment").resolve()),
+            "conservation": str((results_dir / "conservation").resolve()),
+            "config": str((results_dir / "config").resolve()),
+            "varvamp": (
+                None
+                if varvamp_results is None
+                else str(varvamp_results.resolve())
+            ),
+        },
         "downstream_alignment": str(downstream_alignment.resolve()),
         "sequence_counts": {
             "initial_input": int(initial_count),
@@ -244,8 +269,10 @@ def write_workflow_summary(
     path: Path,
     *,
     project_name: str,
+    run_id: str,
     input_file: Path,
     downstream_alignment: Path,
+    workdir: Path,
     results_dir: Path,
     initial_count: int,
     after_redundancy: int,
@@ -256,7 +283,9 @@ def write_workflow_summary(
         "VarVAMP ASSAY-DESIGN WORKFLOW SUMMARY",
         "=" * 55,
         f"Project: {project_name}",
-        f"Input FASTA: {input_file}",
+        f"Run ID: {run_id}",
+        "Workflow stage: design",
+        f"Design FASTA: {input_file}",
         f"Initial sequences: {initial_count}",
         f"Sequences entering final MAFFT: {after_redundancy}",
         f"Orientation: {args.orientation}",
@@ -275,6 +304,7 @@ def write_workflow_summary(
             else "Result directory: N/A"
         ),
         "",
+        f"Work directory: {workdir}",
         f"Results directory: {results_dir}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -385,8 +415,33 @@ def parse_arguments() -> argparse.Namespace:
 
     parser.add_argument("--input", type=Path, default=None, help="Input FASTA file.")
     parser.add_argument("--project-name", type=str, default=None)
-    parser.add_argument("--workdir", type=Path, default=None)
-    parser.add_argument("--results", type=Path, default=None)
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help=(
+            "Optional run identifier. By default a timestamp such as "
+            "20260906_164500 is generated automatically."
+        ),
+    )
+    parser.add_argument(
+        "--workdir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional override for this run work directory. Default: "
+            "work/<project>/design/<run_id>."
+        ),
+    )
+    parser.add_argument(
+        "--results",
+        type=Path,
+        default=None,
+        help=(
+            "Optional override for this run results directory. Default: "
+            "results/<project>/design/<run_id>."
+        ),
+    )
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument(
         "--verbose",
@@ -520,11 +575,47 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def ask_for_input_file() -> Path:
-    """Interactively request the input FASTA file."""
+    """Interactively select the Workflow 01 design FASTA."""
+
+    design_dir = Path("data") / "design"
+    candidates: list[Path] = []
+    if design_dir.is_dir():
+        for pattern in ("*.fasta", "*.fa", "*.fna", "*.fas"):
+            candidates.extend(design_dir.glob(pattern))
+        candidates = sorted({path.resolve() for path in candidates if path.is_file()})
+
+    print("\nDesign database")
+    print("===============")
+    print("Workflow 01 uses the FASTA stored in data/design/ for assay design.")
+
+    if candidates:
+        for index, path in enumerate(candidates, start=1):
+            print(f"{index}. {compact_path(path)}")
+        print(f"{len(candidates) + 1}. Enter another FASTA path")
+
+        while True:
+            try:
+                raw = input("Select the design FASTA by number: ").strip()
+            except EOFError as error:
+                raise RuntimeError(
+                    "No interactive input is available. Use --input."
+                ) from error
+
+            try:
+                selected = int(raw)
+            except ValueError:
+                print("Please enter one of the displayed numbers.")
+                continue
+
+            if 1 <= selected <= len(candidates):
+                return candidates[selected - 1]
+            if selected == len(candidates) + 1:
+                break
+            print("Selection outside the available range.")
 
     while True:
         try:
-            raw_value = input("Name or path of the input FASTA file: ").strip()
+            raw_value = input("Name or path of the design FASTA file: ").strip()
         except EOFError as error:
             raise RuntimeError(
                 "No interactive input is available. Use --input."
@@ -538,6 +629,8 @@ def ask_for_input_file() -> Path:
         candidate = Path(raw_value).expanduser()
         possible_paths = [candidate]
         if not candidate.is_absolute() and candidate.parent == Path("."):
+            possible_paths.append(design_dir / candidate)
+            # Compatibility fallback for older repository layouts.
             possible_paths.append(Path("data") / candidate)
 
         for possible_path in possible_paths:
@@ -736,6 +829,79 @@ def sanitize_project_name(value: str) -> str:
     if not cleaned:
         raise ValueError("The project name is empty or invalid.")
     return cleaned
+
+
+def sanitize_run_id(value: str) -> str:
+    """Validate/sanitize a run identifier used as a directory name."""
+
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip()).strip("._-")
+    if not cleaned:
+        raise ValueError("The run ID is empty or invalid.")
+    return cleaned
+
+
+def generate_run_id() -> str:
+    """Generate a human-readable local timestamp for one workflow execution."""
+
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def resolve_run_directories(
+    args: argparse.Namespace,
+    project_name: str,
+) -> tuple[str, Path, Path]:
+    """
+    Resolve isolated work/results directories for one assay-design run.
+
+    The default layout is:
+      work/<project>/design/<run_id>/
+      results/<project>/design/<run_id>/
+
+    When the automatically generated timestamp already exists, a numeric
+    suffix is added so an earlier run is never overwritten. Explicit
+    --workdir/--results values remain exact per-run overrides.
+    """
+
+    requested_run_id = (
+        sanitize_run_id(args.run_id)
+        if args.run_id is not None
+        else generate_run_id()
+    )
+
+    if args.workdir is not None or args.results is not None:
+        workdir = (
+            args.workdir.expanduser().resolve()
+            if args.workdir is not None
+            else (Path("work") / project_name / "design" / requested_run_id).resolve()
+        )
+        results_dir = (
+            args.results.expanduser().resolve()
+            if args.results is not None
+            else (Path("results") / project_name / "design" / requested_run_id).resolve()
+        )
+        return requested_run_id, workdir, results_dir
+
+    candidate = requested_run_id
+    suffix = 1
+    while True:
+        workdir = (Path("work") / project_name / "design" / candidate).resolve()
+        results_dir = (Path("results") / project_name / "design" / candidate).resolve()
+        if not workdir.exists() and not results_dir.exists():
+            return candidate, workdir, results_dir
+        suffix += 1
+        candidate = f"{requested_run_id}_{suffix:02d}"
+
+
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest of a file for provenance tracking."""
+
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def validate_fraction(
@@ -2305,15 +2471,47 @@ def validate_custom_varvamp_config(path: Path, mode: str) -> None:
             )
 
 
+def stage_varvamp_config_for_run(
+    source: Path,
+    config_dir: Path,
+    mode: str,
+    attempt_number: int,
+) -> Path:
+    """Copy an externally selected config into the permanent run results."""
+
+    source = source.expanduser().resolve()
+    validate_custom_varvamp_config(source, mode)
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        source.relative_to(config_dir.resolve())
+        return source
+    except ValueError:
+        pass
+
+    destination = (
+        config_dir
+        / f"varvamp_{mode}_selected_attempt_{attempt_number:02d}.py"
+    )
+    if destination.exists():
+        raise RuntimeError(
+            "Refusing to overwrite a staged VarVAMP configuration: "
+            f"{destination}"
+        )
+    shutil.copy2(source, destination)
+    validate_custom_varvamp_config(destination, mode)
+    return destination.resolve()
+
+
 def next_custom_varvamp_config_path(
-    results_dir: Path,
+    config_dir: Path,
     mode: str,
 ) -> Path:
     """Return a new attempt-specific config filename without overwriting older files."""
     attempt = 1
     while True:
         candidate = (
-            results_dir
+            config_dir
             / f"varvamp_{mode}_config_attempt_{attempt}.py"
         )
         if not candidate.exists():
@@ -2521,7 +2719,7 @@ def edit_varvamp_config_in_terminal(
 def configure_custom_varvamp_file(
     args: argparse.Namespace,
     mode: str,
-    results_dir: Path,
+    config_dir: Path,
 ) -> bool:
     """
     Explicitly create/edit or select a custom VarVAMP Python configuration.
@@ -2569,7 +2767,8 @@ def configure_custom_varvamp_file(
             print(preview.rstrip())
 
             if ask_yes_no("Save this configuration and use it for this VarVAMP attempt?"):
-                path = next_custom_varvamp_config_path(results_dir, mode)
+                config_dir.mkdir(parents=True, exist_ok=True)
+                path = next_custom_varvamp_config_path(config_dir, mode)
                 path.write_text(preview, encoding="utf-8")
                 validate_custom_varvamp_config(path, mode)
                 args.varvamp_config = path
@@ -2900,7 +3099,7 @@ def ensure_mode_required_interactive_parameters(
 def adjust_varvamp_after_failure(
     args: argparse.Namespace,
     mode: str,
-    results_dir: Path,
+    config_dir: Path,
 ) -> str:
     """
     Adjust parameters after a failed VarVAMP attempt.
@@ -3000,14 +3199,14 @@ def adjust_varvamp_after_failure(
         changed = configure_custom_varvamp_file(
             args,
             mode,
-            results_dir,
+            config_dir,
         )
         if changed:
             return "retry"
         return adjust_varvamp_after_failure(
             args,
             mode,
-            results_dir,
+            config_dir,
         )
 
     if choice == "mode":
@@ -3033,12 +3232,19 @@ def adjust_varvamp_after_failure(
 
 
 def copy_varvamp_tree(varvamp_dir: Path, results_dir: Path, mode: str) -> Path:
-    """Copy the complete VarVAMP result tree so no mode-specific output is lost."""
+    """Copy the complete successful VarVAMP tree into this isolated run."""
 
-    destination = results_dir / f"varvamp_{mode}"
+    destination = results_dir / "varvamp"
     if destination.exists():
-        shutil.rmtree(destination)
+        raise RuntimeError(
+            "The VarVAMP result directory already exists inside this run: "
+            f"{destination}. Refusing to overwrite an existing result."
+        )
     shutil.copytree(varvamp_dir, destination)
+    (destination / "assay_mode.txt").write_text(
+        mode.upper() + "\n",
+        encoding="utf-8",
+    )
     return destination
 
 
@@ -3242,22 +3448,39 @@ def main() -> int:
         project_name = sanitize_project_name(
             args.project_name if args.project_name else input_file.stem
         )
-        workdir = (
-            args.workdir.expanduser().resolve()
-            if args.workdir is not None
-            else (Path("work") / project_name).resolve()
+        run_id, workdir, results_dir = resolve_run_directories(
+            args,
+            project_name,
         )
-        results_dir = (
-            args.results.expanduser().resolve()
-            if args.results is not None
-            else (Path("results") / project_name).resolve()
-        )
-        workdir.mkdir(parents=True, exist_ok=True)
-        results_dir.mkdir(parents=True, exist_ok=True)
+
+        # Run-specific working areas contain reconstructible/intermediate files.
+        preprocessing_workdir = workdir / "preprocessing"
+        alignment_workdir = workdir / "alignment"
+        varvamp_work_root = workdir / "varvamp"
+
+        # Run-specific result areas contain permanent scientific outputs.
+        preprocessing_results_dir = results_dir / "preprocessing"
+        alignment_results_dir = results_dir / "alignment"
+        conservation_results_dir = results_dir / "conservation"
+        config_results_dir = results_dir / "config"
+
+        for directory in (
+            preprocessing_workdir,
+            alignment_workdir,
+            varvamp_work_root,
+            preprocessing_results_dir,
+            alignment_results_dir,
+            conservation_results_dir,
+            config_results_dir,
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
 
         WORKFLOW_LOG = results_dir / "workflow.log"
         WORKFLOW_LOG.write_text(
-            "VarVAMP assay-design workflow log\n",
+            "VarVAMP assay-design workflow log\n"
+            f"Project: {project_name}\n"
+            f"Run ID: {run_id}\n"
+            f"Design FASTA: {input_file}\n",
             encoding="utf-8",
         )
 
@@ -3265,10 +3488,11 @@ def main() -> int:
         print("║       VarVAMP ASSAY DESIGN WORKFLOW         ║")
         print("╚══════════════════════════════════════════════╝")
         print(f"Project : {project_name}")
+        print(f"Run ID  : {run_id}")
         print(f"Input   : {compact_path(input_file)}")
+        print(f"Work    : {compact_path(workdir)}")
         print(f"Results : {compact_path(results_dir)}")
         if VERBOSE:
-            print(f"Workdir : {workdir}")
             print(f"Log     : {WORKFLOW_LOG}")
 
         interactive = sys.stdin.isatty()
@@ -3326,7 +3550,7 @@ def main() -> int:
             print("Running sequence orientation normalization with MAFFT.")
             current_fasta, reversed_count = normalize_orientation_with_mafft(
                 current_fasta,
-                workdir,
+                preprocessing_workdir,
                 project_name,
                 args.orientation,
                 args.threads,
@@ -3351,6 +3575,20 @@ def main() -> int:
                 f"Orientation unchanged     : {initial_count - reversed_count}"
             )
 
+        if args.orientation != "keep":
+            oriented_result = (
+                preprocessing_results_dir / f"{project_name}_oriented.fasta"
+            )
+            shutil.copy2(current_fasta, oriented_result)
+            orientation_report = (
+                preprocessing_workdir / f"{project_name}_orientation_report.txt"
+            )
+            if orientation_report.is_file():
+                shutil.copy2(
+                    orientation_report,
+                    preprocessing_results_dir / orientation_report.name,
+                )
+
         # ------------------------------------------------------------------
         # 2. Circular start-position normalization
         # ------------------------------------------------------------------
@@ -3369,7 +3607,7 @@ def main() -> int:
             before_mars = current_fasta
             current_fasta = run_mars_rotation(
                 current_fasta,
-                workdir,
+                preprocessing_workdir,
                 project_name,
                 args.mars_executable,
             )
@@ -3386,6 +3624,12 @@ def main() -> int:
             print("Cyclic starts changed     : 0")
         else:
             raise ValueError("--topology must be 'linear' or 'circular'.")
+
+        if args.topology == "circular":
+            shutil.copy2(
+                current_fasta,
+                preprocessing_results_dir / f"{project_name}_rotated.fasta",
+            )
 
         # ------------------------------------------------------------------
         # 3. Redundancy handling
@@ -3459,7 +3703,7 @@ def main() -> int:
                 )
 
         redundancy_output = (
-            workdir / f"{project_name}_redundancy_filtered.fasta"
+            preprocessing_workdir / f"{project_name}_redundancy_filtered.fasta"
         )
         before_redundancy = count_fasta_sequences(current_fasta)
         word_size: int | None = None
@@ -3541,6 +3785,20 @@ def main() -> int:
                 f"Cluster representatives   : {after_redundancy}"
             )
 
+        # Keep the biologically meaningful preprocessing output for provenance.
+        redundancy_result = (
+            preprocessing_results_dir
+            / f"{project_name}_redundancy_filtered.fasta"
+        )
+        shutil.copy2(redundancy_output, redundancy_result)
+        if args.redundancy == "cdhit":
+            cluster_file = Path(str(redundancy_output) + ".clstr")
+            if cluster_file.is_file():
+                shutil.copy2(
+                    cluster_file,
+                    preprocessing_results_dir / cluster_file.name,
+                )
+
         # ------------------------------------------------------------------
         # 4. Final MAFFT multiple sequence alignment
         # ------------------------------------------------------------------
@@ -3565,7 +3823,7 @@ def main() -> int:
             )
 
         check_required_tools([("MAFFT", args.mafft_executable)])
-        final_alignment = workdir / f"{project_name}_alignment.fasta"
+        final_alignment = alignment_workdir / f"{project_name}_alignment.fasta"
 
         print(f"Running final MAFFT alignment: {args.mafft_strategy}")
         mafft_reported_strategy = run_final_mafft(
@@ -3577,10 +3835,11 @@ def main() -> int:
         )
         read_alignment(final_alignment)
 
-        shutil.copy2(
-            final_alignment,
-            results_dir / f"{project_name}_alignment.fasta",
+        final_alignment_result = (
+            alignment_results_dir / f"{project_name}_alignment.fasta"
         )
+        shutil.copy2(final_alignment, final_alignment_result)
+        downstream_alignment_result = final_alignment_result
 
         pretrim_stats, pretrim_sequences = calculate_alignment_statistics(
             final_alignment
@@ -3612,7 +3871,7 @@ def main() -> int:
         save_alignment_statistics(
             pretrim_stats,
             pretrim_sequences,
-            results_dir,
+            alignment_results_dir,
             project_name,
             "pretrim",
         )
@@ -3657,7 +3916,7 @@ def main() -> int:
                 [("trimAl", args.trimal_executable)]
             )
             trimmed_alignment = (
-                workdir / f"{project_name}_alignment_trimmed.fasta"
+                alignment_workdir / f"{project_name}_alignment_trimmed.fasta"
             )
 
             print(f"\nRunning trimAl strategy: {args.trimming}")
@@ -3670,11 +3929,12 @@ def main() -> int:
             )
             downstream_alignment = trimmed_alignment
 
-            shutil.copy2(
-                trimmed_alignment,
-                results_dir
-                / f"{project_name}_alignment_trimmed.fasta",
+            trimmed_alignment_result = (
+                alignment_results_dir
+                / f"{project_name}_alignment_trimmed.fasta"
             )
+            shutil.copy2(trimmed_alignment, trimmed_alignment_result)
+            downstream_alignment_result = trimmed_alignment_result
 
             posttrim_stats, posttrim_sequences = (
                 calculate_alignment_statistics(trimmed_alignment)
@@ -3683,7 +3943,7 @@ def main() -> int:
             save_alignment_statistics(
                 posttrim_stats,
                 posttrim_sequences,
-                results_dir,
+                alignment_results_dir,
                 project_name,
                 "posttrim",
             )
@@ -3729,7 +3989,7 @@ def main() -> int:
         print("\n6. Conservation analysis")
         perform_conservation_analysis(
             downstream_alignment,
-            results_dir,
+            conservation_results_dir,
             project_name,
             args.min_occupancy,
             args.min_major_frequency,
@@ -3803,10 +4063,14 @@ def main() -> int:
                 validate_varvamp_mode_parameters(args, mode)
 
                 varvamp_workdir = (
-                    workdir / f"{project_name}_varvamp_{mode}"
+                    varvamp_work_root
+                    / f"attempt_{attempt_number:02d}_{mode}"
                 )
                 if varvamp_workdir.exists():
-                    shutil.rmtree(varvamp_workdir)
+                    raise RuntimeError(
+                        "Unexpected existing VarVAMP attempt directory: "
+                        f"{varvamp_workdir}. Refusing to overwrite it."
+                    )
 
                 command = build_varvamp_command(
                     args,
@@ -3823,13 +4087,14 @@ def main() -> int:
 
                 config_path: Path | None = None
                 if args.varvamp_config is not None:
-                    config_path = (
-                        args.varvamp_config.expanduser().resolve()
-                    )
-                    validate_custom_varvamp_config(
-                        config_path,
+                    config_path = stage_varvamp_config_for_run(
+                        args.varvamp_config,
+                        config_results_dir,
                         mode,
+                        attempt_number,
                     )
+                    # Keep the run-local copy as the canonical provenance path.
+                    args.varvamp_config = config_path
                     command_env["VARVAMP_CONFIG"] = str(config_path)
 
                 section(f"VarVAMP attempt {attempt_number}")
@@ -3945,7 +4210,7 @@ def main() -> int:
                 action = adjust_varvamp_after_failure(
                     args,
                     mode,
-                    results_dir,
+                    config_results_dir,
                 )
 
                 if action == "stop":
@@ -3975,10 +4240,11 @@ def main() -> int:
         write_project_manifest(
             manifest_file,
             project_name=project_name,
+            run_id=run_id,
             input_file=input_file,
             workdir=workdir,
             results_dir=results_dir,
-            downstream_alignment=downstream_alignment,
+            downstream_alignment=downstream_alignment_result,
             initial_count=initial_count,
             after_redundancy=after_redundancy,
             args=args,
@@ -3989,8 +4255,10 @@ def main() -> int:
         write_workflow_summary(
             summary_file,
             project_name=project_name,
+            run_id=run_id,
             input_file=input_file,
-            downstream_alignment=downstream_alignment,
+            downstream_alignment=downstream_alignment_result,
+            workdir=workdir,
             results_dir=results_dir,
             initial_count=initial_count,
             after_redundancy=after_redundancy,
@@ -4006,13 +4274,14 @@ def main() -> int:
             )
 
         section("Workflow completed")
+        print(f"Run ID                   : {run_id}")
         print(f"Initial sequences        : {initial_count}")
         print(
             f"Final MAFFT sequences    : {after_redundancy}"
         )
         print(
             f"Downstream alignment     : "
-            f"{compact_path(downstream_alignment)}"
+            f"{compact_path(downstream_alignment_result)}"
         )
 
         if varvamp_results is not None:
@@ -4041,6 +4310,8 @@ def main() -> int:
             f"Workflow log             : "
             f"{compact_path(WORKFLOW_LOG)}"
         )
+        print(f"Permanent run results    : {compact_path(results_dir)}")
+        print(f"Reconstructible work     : {compact_path(workdir)}")
         return 0
 
     except (
