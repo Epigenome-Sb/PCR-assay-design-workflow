@@ -1,53 +1,47 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environments
 .venv/
 venv/
 env/
 
-# Python tooling
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Generated Workflow 01 intermediate files
+# Workflow intermediate files
 work/
-*.clstr
 
-# Generated Workflow 01 results
+# Generated results
 results/*
 !results/README.md
 
-# Generated Workflow 02 validation files
-validation_inputs/
+# Biological FASTA inputs
+data/design/*
+data/validation/*
 
-# Local FASTA datasets
-data/*.fa
-data/*.fasta
-data/*.fna
-data/*.fas
-data/*.fastq
-data/*.fq
-data/*.fastq.gz
-data/*.fq.gz
+# Keep empty directory placeholders
+!data/design/.gitkeep
+!data/validation/.gitkeep
 
-# Keep data documentation and accession metadata
-!data/README.md
-!data/accession_numbers.tsv
+# Common sequence files anywhere else under data
+data/**/*.fa
+data/**/*.fasta
+data/**/*.fna
+data/**/*.fas
+data/**/*.fastq
+data/**/*.fq
+data/**/*.fastq.gz
+data/**/*.fq.gz
 
-# Temporary and log files
+# Logs and temporary files
 *.log
 *.tmp
 *.temp
 
-# Editor and IDE files
+# Editors / OS
 .vscode/
 .idea/
-
-# Operating-system files
 .DS_Store
 Thumbs.db
