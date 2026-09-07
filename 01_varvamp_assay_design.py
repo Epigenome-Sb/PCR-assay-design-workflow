@@ -102,6 +102,26 @@ def compact_path(path: Path | str) -> str:
         return str(path_obj)
 
 
+def portable_manifest_path(path: Path | str) -> str:
+    """
+    Serialize a path for machine-readable manifests.
+
+    Paths located inside the repository/current working directory are stored
+    relative to that directory so the same manifest can be reused after moving
+    the project, including between native execution and Docker (/app).
+
+    Truly external paths remain absolute because there is no safe repository-
+    relative representation for them.
+    """
+    resolved = Path(path).expanduser().resolve()
+    repository_root = Path.cwd().resolve()
+
+    try:
+        return resolved.relative_to(repository_root).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
 def section(title: str) -> None:
     print(f"\n{title}")
     print("─" * len(title))
@@ -186,25 +206,30 @@ def write_project_manifest(
         "schema_version": 2,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "workflow_stage": "design",
+        "path_base": "repository_root",
+        "path_policy": (
+            "repository-relative when inside the project; "
+            "absolute only for external paths"
+        ),
         "project_name": project_name,
         "run_id": run_id,
         "input_role": "design_database",
-        "input_fasta": str(input_file.resolve()),
+        "input_fasta": portable_manifest_path(input_file),
         "input_sha256": sha256_file(input_file),
-        "workdir": str(workdir.resolve()),
-        "results_dir": str(results_dir.resolve()),
+        "workdir": portable_manifest_path(workdir),
+        "results_dir": portable_manifest_path(results_dir),
         "result_directories": {
-            "preprocessing": str((results_dir / "preprocessing").resolve()),
-            "alignment": str((results_dir / "alignment").resolve()),
-            "conservation": str((results_dir / "conservation").resolve()),
-            "config": str((results_dir / "config").resolve()),
+            "preprocessing": portable_manifest_path(results_dir / "preprocessing"),
+            "alignment": portable_manifest_path(results_dir / "alignment"),
+            "conservation": portable_manifest_path(results_dir / "conservation"),
+            "config": portable_manifest_path(results_dir / "config"),
             "varvamp": (
                 None
                 if varvamp_results is None
-                else str(varvamp_results.resolve())
+                else portable_manifest_path(varvamp_results)
             ),
         },
-        "downstream_alignment": str(downstream_alignment.resolve()),
+        "downstream_alignment": portable_manifest_path(downstream_alignment),
         "sequence_counts": {
             "initial_input": int(initial_count),
             "entering_final_mafft": int(after_redundancy),
@@ -230,7 +255,7 @@ def write_project_manifest(
             "result_dir": (
                 None
                 if varvamp_results is None
-                else str(varvamp_results.resolve())
+                else portable_manifest_path(varvamp_results)
             ),
             "consensus_threshold": args.varvamp_threshold,
             "primer_ambiguity": args.primer_ambiguity,
@@ -246,7 +271,7 @@ def write_project_manifest(
             "custom_config": (
                 None
                 if args.varvamp_config is None
-                else str(args.varvamp_config.expanduser().resolve())
+                else portable_manifest_path(args.varvamp_config)
             ),
             "attempts": varvamp_attempts or [],
         },
@@ -254,7 +279,7 @@ def write_project_manifest(
         "workflow_log": (
             None
             if WORKFLOW_LOG is None
-            else str(WORKFLOW_LOG.resolve())
+            else portable_manifest_path(WORKFLOW_LOG)
         ),
     }
 
@@ -285,7 +310,7 @@ def write_workflow_summary(
         f"Project: {project_name}",
         f"Run ID: {run_id}",
         "Workflow stage: design",
-        f"Design FASTA: {input_file}",
+        f"Design FASTA: {compact_path(input_file)}",
         f"Initial sequences: {initial_count}",
         f"Sequences entering final MAFFT: {after_redundancy}",
         f"Orientation: {args.orientation}",
@@ -293,19 +318,19 @@ def write_workflow_summary(
         f"Redundancy: {args.redundancy}",
         f"Final MAFFT strategy: {args.mafft_strategy}",
         f"Trimming: {args.trimming}",
-        f"Downstream alignment: {downstream_alignment}",
+        f"Downstream alignment: {compact_path(downstream_alignment)}",
         "",
         "VarVAMP:",
         f"Executed: {'yes' if not args.skip_varvamp else 'no'}",
         f"Mode: {args.varvamp_mode if not args.skip_varvamp else 'N/A'}",
         (
-            f"Result directory: {varvamp_results}"
+            f"Result directory: {compact_path(varvamp_results)}"
             if varvamp_results is not None
             else "Result directory: N/A"
         ),
         "",
-        f"Work directory: {workdir}",
-        f"Results directory: {results_dir}",
+        f"Work directory: {compact_path(workdir)}",
+        f"Results directory: {compact_path(results_dir)}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -3480,7 +3505,7 @@ def main() -> int:
             "VarVAMP assay-design workflow log\n"
             f"Project: {project_name}\n"
             f"Run ID: {run_id}\n"
-            f"Design FASTA: {input_file}\n",
+            f"Design FASTA: {compact_path(input_file)}\n",
             encoding="utf-8",
         )
 
@@ -4149,7 +4174,7 @@ def main() -> int:
                     "qpcr_test_n": args.qpcr_test_n,
                     "qpcr_deltag": args.qpcr_deltag,
                     "custom_config": (
-                        str(config_path)
+                        portable_manifest_path(config_path)
                         if config_path is not None
                         else None
                     ),

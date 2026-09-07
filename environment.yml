@@ -1,4 +1,4 @@
-name: varvamp-qpcr-workflow
+name: pcr-assay-design-workflow
 
 channels:
   - conda-forge
@@ -32,10 +32,7 @@ dependencies:
   # Workflow 02 - In silico validation
   # ============================================================
 
-  # FASTA processing
-  # SeqKit is already installed above
-
-  # Probe validation with blastn-short
+  # Probe validation with BLAST+
   - blast
 
   # ============================================================
@@ -45,16 +42,3 @@ dependencies:
   - pip
   - pip:
       - varvamp==1.3.2
-
-
-# ==============================================================
-# Additional external programs
-# ==============================================================
-
-# Workflow 01:
-# - MARS
-#   Circular genome start-position normalization
-#
-# Workflow 02:
-# - MFEprimer
-#   Primer-pair specificity and target-coverage analysis

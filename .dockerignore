@@ -1,0 +1,31 @@
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Workflow data and generated files
+data/
+work/
+results/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

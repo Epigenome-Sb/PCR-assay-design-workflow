@@ -1,3 +1,8 @@
+# ============================================================
+# PCR Assay Design Workflow
+# Git ignore rules
+# ============================================================
+
 # Python
 __pycache__/
 *.py[cod]
@@ -10,22 +15,32 @@ __pycache__/
 venv/
 env/
 
+# ============================================================
 # Workflow intermediate files
+# ============================================================
+
 work/
 
+# ============================================================
 # Generated results
+# ============================================================
+
 results/*
 !results/README.md
+!results/.gitkeep
 
-# Biological FASTA inputs
+# ============================================================
+# Biological input data
+# ============================================================
+
 data/design/*
 data/validation/*
 
-# Keep empty directory placeholders
+# Keep directory structure
 !data/design/.gitkeep
 !data/validation/.gitkeep
 
-# Common sequence files anywhere else under data
+# Common biological sequence files elsewhere under data/
 data/**/*.fa
 data/**/*.fasta
 data/**/*.fna
@@ -35,12 +50,18 @@ data/**/*.fq
 data/**/*.fastq.gz
 data/**/*.fq.gz
 
+# ============================================================
 # Logs and temporary files
+# ============================================================
+
 *.log
 *.tmp
 *.temp
 
-# Editors / OS
+# ============================================================
+# Editors / operating systems
+# ============================================================
+
 .vscode/
 .idea/
 .DS_Store

@@ -133,6 +133,87 @@ def compact_path(path: Path | str) -> str:
     except Exception:
         return str(path_obj)
 
+
+def portable_project_path(path: Path | str) -> str:
+    """
+    Serialize paths for manifests and provenance tables.
+
+    Files located inside the current project are stored relative to the
+    repository root. Truly external files remain absolute.
+    """
+    resolved = Path(path).expanduser().resolve()
+    repository_root = Path.cwd().resolve()
+
+    try:
+        return resolved.relative_to(repository_root).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def optional_portable_project_path(value: object) -> str:
+    """Serialize an optional path while preserving empty/not-applicable values."""
+    if value is None or str(value) == "":
+        return ""
+    return portable_project_path(Path(str(value)))
+
+
+def _legacy_project_relative_candidate(path: Path) -> Path | None:
+    """
+    Recover a project-relative suffix from an old absolute path.
+
+    This is mainly for manifests created before portable paths were introduced,
+    for example:
+        /app/results/<project>/design/<run_id>/varvamp
+        /home/user/repo/results/<project>/design/<run_id>/varvamp
+    """
+    parts = path.parts
+    for marker in ("results", "work", "data"):
+        if marker in parts:
+            index = parts.index(marker)
+            return Path(*parts[index:])
+    return None
+
+
+def resolve_manifest_path(value: str | Path, manifest_path: Path) -> Path:
+    """
+    Resolve a path stored in a Workflow 01 manifest.
+
+    Resolution order:
+    1. Existing absolute path.
+    2. Legacy absolute project path remapped under the current repository root.
+    3. Repository-relative path (schema v2 portable path policy).
+    4. Legacy manifest-directory-relative path.
+
+    This makes a design run portable between native execution and Docker while
+    retaining compatibility with older manifests that stored /app/... paths.
+    """
+    repository_root = Path.cwd().resolve()
+    path = Path(value).expanduser()
+
+    if path.is_absolute():
+        resolved = path.resolve()
+        if resolved.exists():
+            return resolved
+
+        legacy_relative = _legacy_project_relative_candidate(resolved)
+        if legacy_relative is not None:
+            remapped = (repository_root / legacy_relative).resolve()
+            if remapped.exists():
+                return remapped
+
+        return resolved
+
+    repository_candidate = (repository_root / path).resolve()
+    if repository_candidate.exists():
+        return repository_candidate
+
+    manifest_candidate = (manifest_path.parent / path).resolve()
+    if manifest_candidate.exists():
+        return manifest_candidate
+
+    return repository_candidate
+
+
 def section(title: str) -> None:
     print(f"\n{title}")
     print("─" * len(title))
@@ -277,14 +358,6 @@ def executable_version(executable: str) -> str:
         if output:
             return output.splitlines()[0][:300]
     return "unknown"
-
-
-def resolve_manifest_path(value: str | Path, manifest_path: Path) -> Path:
-    """Resolve a path stored in a design manifest."""
-    path = Path(value).expanduser()
-    if path.is_absolute():
-        return path.resolve()
-    return (manifest_path.parent / path).resolve()
 
 
 def load_design_manifest(manifest_path: Path) -> dict[str, object]:
@@ -520,15 +593,15 @@ def write_validation_database_summary(
         writer = csv.writer(handle, delimiter="\t")
         writer.writerow(["field", "value"])
         rows = [
-            ("source_fasta", str(source_database.resolve())),
+            ("source_fasta", portable_project_path(source_database)),
             ("source_sha256", sha256_file(source_database)),
             ("source_sequences", int(source_stats["sequences"])),
             ("source_length_range", f"{source_stats['min_length']}-{source_stats['max_length']}"),
             ("length_filter", filter_description),
-            ("retained_fasta", str(retained_database.resolve())),
+            ("retained_fasta", portable_project_path(retained_database)),
             ("retained_sequences", int(retained_stats["sequences"])),
             ("retained_length_range", f"{retained_stats['min_length']}-{retained_stats['max_length']}"),
-            ("formatted_mfeprimer_fasta", str(formatted_database.resolve())),
+            ("formatted_mfeprimer_fasta", portable_project_path(formatted_database)),
         ]
         writer.writerows(rows)
 
@@ -557,43 +630,51 @@ def write_validation_manifest(
     run_result: dict[str, object],
 ) -> None:
     """Write a machine-readable provenance record for Workflow 02."""
-    index_files = [str(Path(path).resolve()) for path in index_info.get("files", [])]
+    index_files = [
+        portable_project_path(Path(path))
+        for path in index_info.get("files", [])
+    ]
     manifest = {
         "schema_version": 2,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "workflow_stage": "validation",
+        "path_base": "repository_root",
+        "path_policy": (
+            "repository-relative when inside the project; "
+            "absolute only for external paths"
+        ),
         "project_name": project_name,
         "run_id": run_id,
         "parent_design": {
-            "manifest": str(design_manifest_path.resolve()),
+            "manifest": portable_project_path(design_manifest_path),
             "run_id": design_run_id,
             "mode": assay_mode,
-            "varvamp_result_dir": str(varvamp_result_dir.resolve()),
+            "varvamp_result_dir": portable_project_path(varvamp_result_dir),
             "design_input_fasta": design_manifest.get("input_fasta"),
             "design_input_sha256": design_manifest.get("input_sha256"),
         },
         "input_role": "validation_database",
         "validation_database": {
-            "source_fasta": str(source_database.resolve()),
+            "source_fasta": portable_project_path(source_database),
             "source_sha256": sha256_file(source_database),
             "raw_statistics": raw_stats,
             "length_filter": length_filter_description,
-            "retained_fasta": str(retained_database.resolve()),
+            "retained_fasta": portable_project_path(retained_database),
             "retained_statistics": retained_stats,
-            "mfeprimer_formatted_fasta": str(formatted_database.resolve()),
+            "mfeprimer_formatted_fasta": portable_project_path(formatted_database),
             "index": {
                 "status": index_info.get("status"),
                 "layout": index_info.get("detail"),
                 "files": index_files,
             },
         },
-        "workdir": str(workdir.resolve()),
-        "results_dir": str(results_dir.resolve()),
+        "workdir": portable_project_path(workdir),
+        "results_dir": portable_project_path(results_dir),
         "result_directories": {
-            "inputs": str((results_dir / "inputs").resolve()),
-            "mfeprimer": str((results_dir / "mfeprimer").resolve()),
-            "probe_blast": str((results_dir / "probe_blast").resolve()),
-            "summary": str((results_dir / "summary").resolve()),
+            "inputs": portable_project_path(results_dir / "inputs"),
+            "mfeprimer": portable_project_path(results_dir / "mfeprimer"),
+            "probe_blast": portable_project_path(results_dir / "probe_blast"),
+            "summary": portable_project_path(results_dir / "summary"),
         },
         "selected_assays": selected_schemes,
         "mfeprimer_parameters": (
@@ -620,17 +701,17 @@ def write_validation_manifest(
             "executed": bool(run_result["probe_validation_enabled"]),
         },
         "summary_files": {
-            "coverage_results": str(Path(run_result["coverage_results"]).resolve()),
-            "mfeprimer_runs": str(Path(run_result["mfeprimer_runs"]).resolve()),
-            "secondary_structure_summary": str(Path(run_result["secondary_summary"]).resolve()),
-            "secondary_structure_details": str(Path(run_result["secondary_details"]).resolve()),
+            "coverage_results": portable_project_path(Path(run_result["coverage_results"])),
+            "mfeprimer_runs": portable_project_path(Path(run_result["mfeprimer_runs"])),
+            "secondary_structure_summary": portable_project_path(Path(run_result["secondary_summary"])),
+            "secondary_structure_details": portable_project_path(Path(run_result["secondary_details"])),
         },
         "tool_versions": {
             "seqkit": executable_version("seqkit"),
             "mfeprimer": executable_version("mfeprimer"),
             "blastn": executable_version("blastn") if assay_mode == "qpcr" else "not applicable",
         },
-        "workflow_log": None if VALIDATION_LOG is None else str(VALIDATION_LOG.resolve()),
+        "workflow_log": None if VALIDATION_LOG is None else portable_project_path(VALIDATION_LOG),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -2159,7 +2240,7 @@ def analyse_and_extract_mfeprimer_amplicons(
         f"MFEprimer target-coverage summary — {scheme}",
         "=" * (38 + len(scheme)),
         "",
-        f"MFEprimer report: {report_file}",
+        f"MFEprimer report: {compact_path(report_file)}",
         f"Total validation sequences: {total_target_sequences}",
         f"Potential amplicons parsed: {len(all_rows)}",
         f"TARGET products (LEFT+RIGHT or RIGHT+LEFT): "
@@ -3665,8 +3746,8 @@ def summarize_probe_blast(
         "",
         "This version reports BLAST results only.",
         "No probe optimization or IUPAC substitution is proposed.",
-        f"Raw BLAST output: {raw_file}",
-        f"BLAST query FASTA: {query_file}",
+        f"Raw BLAST output: {compact_path(raw_file)}",
+        f"BLAST query FASTA: {compact_path(query_file)}",
         f"Visual alignments by amplicon: {alignment_amplicon_file}",
         f"Visual alignments by HitID: {alignment_hitid_file}",
         f"Mismatch positions TSV: {mismatch_positions_file}",
@@ -4511,7 +4592,14 @@ def run_mfeprimer_pairs(
                 f"{result_path}"
             )
 
-        run_manifest.append([scheme, str(pair_file), str(database), str(result_path)])
+        run_manifest.append(
+            [
+                scheme,
+                portable_project_path(pair_file),
+                portable_project_path(database),
+                portable_project_path(result_path),
+            ]
+        )
         progress(f"MFEprimer full QC {scheme}", "OK")
 
     # Show concrete primer variants first, immediately followed by the
@@ -4777,13 +4865,13 @@ def run_mfeprimer_pairs(
             blast_analysis["partial_only"],
             blast_analysis["no_hit"],
             blast_analysis["full_length_hitids"],
-            str(analysis["valid_fasta"]),
-            str(analysis["positive_hitids"]),
-            str(analysis["summary"]),
-            str(blast_analysis["hitid_summary"]),
-            str(blast_analysis["blast_summary"]),
-            str(blast_analysis["alignment_hitid_file"]),
-            str(blast_analysis["mismatch_positions_file"]),
+            portable_project_path(Path(analysis["valid_fasta"])),
+            portable_project_path(Path(analysis["positive_hitids"])),
+            portable_project_path(Path(analysis["summary"])),
+            optional_portable_project_path(blast_analysis["hitid_summary"]),
+            optional_portable_project_path(blast_analysis["blast_summary"]),
+            optional_portable_project_path(blast_analysis["alignment_hitid_file"]),
+            optional_portable_project_path(blast_analysis["mismatch_positions_file"]),
             (
                 f"{(100.0 * blast_analysis['exact_0'] / total_target_sequences if total_target_sequences else 0.0):.4f}"
                 if assay_mode == "qpcr" and probe_validation_enabled else ""
@@ -4800,8 +4888,8 @@ def run_mfeprimer_pairs(
                 f"{(100.0 * blast_analysis['full_length_hitids'] / total_target_sequences if total_target_sequences else 0.0):.4f}"
                 if assay_mode == "qpcr" and probe_validation_enabled else ""
             ),
-            str(blast_analysis["variant_statistics_file"]),
-            str(blast_analysis["variant_hitid_matrix_file"]),
+            optional_portable_project_path(blast_analysis["variant_statistics_file"]),
+            optional_portable_project_path(blast_analysis["variant_hitid_matrix_file"]),
         ])
 
     final_step = 10 if assay_mode == "qpcr" else 9
@@ -4944,7 +5032,7 @@ def main() -> int:
             f"Project: {project_name}\n"
             f"Validation run ID: {run_id}\n"
             f"Parent design run ID: {design_run_id}\n"
-            f"Design manifest: {design_manifest_path}\n",
+            f"Design manifest: {compact_path(design_manifest_path)}\n",
             encoding="utf-8",
         )
 

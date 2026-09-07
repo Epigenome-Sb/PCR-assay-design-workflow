@@ -2,7 +2,7 @@ cff-version: 1.2.0
 
 message: "If you use this workflow, please cite it using the metadata below."
 
-title: "VarVAMP Assay Design and In Silico Validation Workflow"
+title: "PCR Assay Design and In Silico Validation Workflow"
 
 type: software
 
@@ -16,20 +16,20 @@ date-released: 2026-09-02
 
 license: GPL-3.0-or-later
 
-repository-code: "https://github.com/Epigenome-Sb/varVAMP-qPCR-workflow"
+repository-code: "https://github.com/Epigenome-Sb/PCR-assay-design-workflow"
 
-url: "https://github.com/Epigenome-Sb/varVAMP-qPCR-workflow"
+url: "https://github.com/Epigenome-Sb/PCR-assay-design-workflow"
 
 abstract: >-
   An interactive and reproducible command-line workflow for nucleotide
   sequence preprocessing, multiple sequence alignment, conservation analysis,
-  assay design with VarVAMP, and in silico validation of PCR and qPCR assays.
-  The workflow supports VarVAMP SINGLE, QPCR, and TILED modes and integrates
-  MAFFT, MARS, SeqKit, CD-HIT-EST, trimAl, VarVAMP, MFEprimer, and BLAST+.
-  It provides explicit scientific parameter checkpoints, reproducible
-  workflow metadata, primer-pair target-coverage analysis, and detailed
-  evaluation of qPCR probes, including expansion and comparison of
-  IUPAC-degenerate probe variants.
+  PCR assay design with VarVAMP, and in silico validation. The workflow
+  supports VarVAMP SINGLE, QPCR, and TILED modes and integrates MAFFT, MARS,
+  SeqKit, CD-HIT-EST, trimAl, VarVAMP, MFEprimer, and BLAST+. It provides
+  explicit scientific parameter checkpoints, run-specific provenance,
+  primer-pair target-coverage analysis, and detailed evaluation of qPCR
+  probes, including expansion and comparison of existing IUPAC-degenerate
+  probe variants.
 
 keywords:
   - PCR

@@ -1,0 +1,52 @@
+services:
+
+  design:
+    image: pcr-assay-design-workflow:latest
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    working_dir: /app
+    stdin_open: true
+    tty: true
+
+    volumes:
+      - .:/app
+
+    entrypoint:
+      - conda
+      - run
+      - --no-capture-output
+      - -n
+      - varvamp-qpcr-workflow
+
+    command:
+      - python3
+      - 01_varvamp_assay_design.py
+
+
+  validation:
+    image: pcr-assay-design-workflow:latest
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    working_dir: /app
+    stdin_open: true
+    tty: true
+
+    volumes:
+      - .:/app
+
+    entrypoint:
+      - conda
+      - run
+      - --no-capture-output
+      - -n
+      - varvamp-qpcr-workflow
+
+    command:
+      - python3
+      - 02_in_silico_validation.py
