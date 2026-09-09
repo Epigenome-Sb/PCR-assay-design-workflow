@@ -3360,92 +3360,71 @@ def save_pdf_first_page_as_png(
 
 def print_varvamp_tables(varvamp_results_dir: Path, mode: str) -> None:
     """
-    Display VarVAMP text results directly in the terminal after a successful run.
+    Display only the principal VarVAMP result files in the terminal.
 
-    PDF and image files are intentionally excluded. Text-based scientific output
-    such as TSV, TABULAR, BED, CSV, TXT and FASTA is displayed.
+    Large FASTA alignments, consensus sequences, BED files, logs, and other
+    technical outputs remain saved in the VarVAMP result directory but are not
+    printed to the terminal.
     """
-    text_extensions = {
-        ".tsv",
-        ".tabular",
-        ".bed",
-        ".txt",
-        ".csv",
-        ".fasta",
-        ".fa",
-        ".fna",
-    }
 
-    preferred_by_mode = {
+    principal_files_by_mode = {
         "qpcr": [
-            "qpcr_primers.tsv",
-            "qpcr_design.tsv",
             "oligos.fasta",
-            "primers.bed",
-            "amplicons.bed",
+            "qpcr_design.tsv",
+            "qpcr_primers.tsv",
         ],
         "single": [
             "primer.tsv",
             "primer_to_amplicon_assignments.tabular",
-            "primers.bed",
-            "amplicons.bed",
         ],
         "tiled": [
             "primer.tsv",
             "primer_to_amplicon_assignments.tabular",
-            "primers.bed",
-            "amplicons.bed",
         ],
     }
 
-    files = [
-        path
-        for path in varvamp_results_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in text_extensions
-    ]
+    principal_files = principal_files_by_mode.get(mode, [])
 
-    preferred_names = preferred_by_mode.get(mode, [])
-    preferred_rank = {
-        name: index
-        for index, name in enumerate(preferred_names)
-    }
+    section(f"VarVAMP {mode.upper()} principal results")
 
-    files.sort(
-        key=lambda path: (
-            preferred_rank.get(path.name, len(preferred_rank) + 1),
-            str(path.relative_to(varvamp_results_dir)),
+    displayed = 0
+
+    for filename in principal_files:
+        matches = sorted(
+            path
+            for path in varvamp_results_dir.rglob(filename)
+            if path.is_file()
         )
-    )
 
-    section(f"VarVAMP {mode.upper()} text results")
+        for path in matches:
+            relative = path.relative_to(varvamp_results_dir)
+            title = str(relative)
 
-    if not files:
-        print("No terminal-readable VarVAMP result files were found.")
-        print(f"Result directory: {compact_path(varvamp_results_dir)}")
-        return
+            print(f"\n{title}")
+            print("-" * len(title))
 
-    for path in files:
-        relative = path.relative_to(varvamp_results_dir)
-        title = str(relative)
-        print(f"\n{title}")
-        print("-" * len(title))
+            try:
+                content = path.read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                ).rstrip()
+            except OSError as error:
+                print(f"[Could not read file: {error}]")
+                continue
 
-        try:
-            content = path.read_text(
-                encoding="utf-8",
-                errors="replace",
-            ).rstrip()
-        except OSError as error:
-            print(f"[Could not read file: {error}]")
-            continue
+            if content:
+                print(content)
+            else:
+                print("[empty file]")
 
-        if content:
-            print(content)
-        else:
-            print("[empty file]")
+            displayed += 1
+
+    if displayed == 0:
+        print("No principal VarVAMP result files were found.")
 
     print(
-        f"\nResult directory: {compact_path(varvamp_results_dir)}"
+        f"\nComplete VarVAMP result directory: "
+        f"{compact_path(varvamp_results_dir)}"
     )
 
 
