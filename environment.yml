@@ -3,42 +3,26 @@ name: pcr-assay-design-workflow
 channels:
   - conda-forge
   - bioconda
+  - nodefaults
 
 dependencies:
-  - python=3.11
-
-  # ============================================================
-  # Workflow 01 - Assay design
-  # ============================================================
-
-  # Sequence orientation and multiple sequence alignment
-  - mafft=7.505
-
-  # Redundancy reduction
+  - python=3.11.11
+  - bioconda::mafft=7.505
   - cd-hit=4.8.1
-  - seqkit
-
-  # Alignment trimming
-  - trimal
-
-  # Python libraries
-  - biopython
-  - pandas
-  - matplotlib
-  - pillow
-  - pymupdf
-
-  # ============================================================
-  # Workflow 02 - In silico validation
-  # ============================================================
-
-  # Probe validation with BLAST+
-  - blast
-
-  # ============================================================
-  # VarVAMP
-  # ============================================================
-
-  - pip
+  - seqkit=2.9.0
+  - trimal=1.5.0
+  - blast=2.16.0
+  - biopython=1.85
+  - pandas=2.2.3
+  - matplotlib-base=3.9.4
+  - pillow=11.1.0
+  - pymupdf=1.25.3
+  # VarVAMP's additional runtime dependencies (no implicit pip resolution).
+  - numpy=1.26.4
+  # seqfold 0.7.18 imports pkg_resources, removed in newer setuptools.
+  - setuptools=75.8.0
+  - pip=25.0.1
   - pip:
+      - primer3-py==2.0.3
+      - seqfold==0.7.18
       - varvamp==1.3.2

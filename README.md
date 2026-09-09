@@ -180,31 +180,83 @@ results/<project>/validation/<run_id>/
 
 ### Docker — recommended
 
-Docker provides the most reproducible installation because the image includes the Conda environment together with MARS and the MFEprimer version expected by the current parser.
+**Docker installation is self-contained.** Install Docker with the Compose plugin
+(Docker Desktop includes it). No local Conda, Python, MAFFT, CD-HIT-EST, SeqKit,
+trimAl, BLAST+, VarVAMP, MARS, MFEprimer, or Python libraries are required.
+Conda itself is included in the image, and the environment
+`pcr-assay-design-workflow` is created during the build.
 
-Build the image from the repository root:
+From the repository root:
 
 ```bash
 docker compose build
-```
-
-Run Workflow 01:
-
-```bash
 docker compose run --rm design
-```
-
-Run Workflow 02:
-
-```bash
 docker compose run --rm validation
 ```
 
-The repository is bind-mounted into the container, so ordinary edits to the Python scripts are immediately visible inside Docker. Rebuild the image after modifying `Dockerfile` or `environment.yml`.
+Both interactive services use the same image and explicitly launch the script
+through `conda run --no-capture-output -n pcr-assay-design-workflow`. No host-side
+`conda activate` is needed. Run them from an interactive terminal.
 
-> **Architecture note**
->
-> The current Dockerfile installs the MFEprimer 3.1.0 `linux-amd64` binary. The provided container workflow is therefore intended primarily for `amd64` / `x86_64` Docker hosts.
+The repository is bind-mounted at `/app`, including local `data/`, `work/`, and
+`results/`: inputs and outputs remain accessible on the host after the container
+exits. Script edits are immediately visible; rebuild after changing `Dockerfile`
+or `environment.yml`. Files created by the default container user may be owned
+by root on Linux. Store inputs within the repository or add an explicit volume
+for external datasets; host absolute paths are not automatically available.
+
+The image includes the following runtime dependencies:
+
+| Dependency | Version / installation |
+|---|---|
+| Linux and Conda | Miniconda image `26.7.1`, pinned to its amd64 manifest digest in `Dockerfile` |
+| Python | Conda, 3.11.11 |
+| MAFFT; CD-HIT (`cd-hit-est`) | Conda, 7.505; 4.8.1 |
+| SeqKit; trimAl | Conda, 2.9.0; 1.5.0 |
+| BLAST+ (`blastn`, `makeblastdb`) | Conda, 2.16.0 |
+| Biopython; pandas; NumPy | Conda, 1.85; 2.2.3; 1.26.4 |
+| matplotlib (`matplotlib-base`); Pillow; PyMuPDF (`fitz`) | Conda, 3.9.4; 11.1.0; 1.25.3 |
+| pip; setuptools (`pkg_resources` for seqfold) | Conda, 25.0.1; 75.8.0 |
+| VarVAMP; primer3-py; seqfold | pip, 1.3.2; 2.0.3; 0.7.18 |
+| MARS | Compiled from commit `cbf8f594e96db8f757f1d84edf773406b4c72701`, including bundled SeqAn, SDSL/divsufsort and Edlib sources |
+| MFEprimer | Official Linux amd64 binary, 3.1.0 |
+| C++/OpenMP runtime and CA certificates | apt: `libstdc++6`, `libgomp1`, `ca-certificates` |
+
+MARS and MFEprimer downloads are SHA-256 checked. MARS compilation uses
+`build-essential`, `cmake`, `git`, `curl`, `unzip`, and `ca-certificates` in a
+separate build stage; these build dependencies are not copied into the runtime.
+The build checks executable availability, versions, Python imports, pip
+consistency, and both scripts' `--help` without running a biological analysis.
+Workflow 02 directly imports only the Python standard library; `makeblastdb`
+is included with BLAST+ although the current script uses `blastn -subject`.
+
+Direct application versions are pinned. Apt packages, Conda build variants and
+transitive dependencies are **not fully locked**, so a fresh solve is not
+promised to be bit-for-bit identical. Exact installed package inventories are
+saved inside the image in `/opt/workflow-manifests/` (`conda-explicit.txt`,
+`pip-freeze.txt`, `dpkg-packages.txt`). Retain the built image by digest for
+identical reruns. Building requires Internet access; running uses dependencies
+already inside the image.
+
+Rebuild from scratch and perform non-destructive startup checks:
+
+```bash
+docker compose config --quiet
+docker compose build --no-cache
+docker compose run --rm design --help
+docker compose run --rm validation --help
+```
+
+For a terminal/input check without starting an analysis:
+
+```bash
+docker compose run --rm --entrypoint conda design run --no-capture-output -n pcr-assay-design-workflow python3 -c 'import sys; assert sys.stdin.isatty() and sys.stdout.isatty(); print(input("Terminal check: type OK then Enter: "))'
+```
+
+**Architecture:** Compose explicitly selects `linux/amd64` because MFEprimer
+3.1.0 is provided as an x86_64 binary. ARM hosts require Docker's amd64 emulation;
+this is not a native ARM image, and emulation may be slower. For a direct build,
+use `docker build --platform linux/amd64 -t pcr-assay-design-workflow:latest .`.
 
 ### Conda — native execution
 

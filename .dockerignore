@@ -29,3 +29,22 @@ results/
 .idea/
 .DS_Store
 Thumbs.db
+# Nested Python caches and local Conda installations
+**/__pycache__/
+**/*.pyc
+.conda/
+conda-env/
+conda-envs/
+miniconda*/
+anaconda*/
+.mamba/
+# Archives and biological datasets are not needed: only scripts/YAML are copied.
+*.tar
+*.tar.gz
+*.zip
+*.fasta
+*.fa
+*.fna
+*.fastq
+*.fq
+*.gz
