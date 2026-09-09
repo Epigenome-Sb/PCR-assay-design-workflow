@@ -48,6 +48,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import re
 from contextlib import redirect_stdout
 from io import StringIO
@@ -62,6 +63,22 @@ IUPAC_DNA = set("ACGTRYSWKMBDHVN")
 
 VERBOSE = False
 VALIDATION_LOG: Path | None = None
+
+
+def available_cpu_threads() -> int:
+    """Return logical CPU threads available to this workflow process."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def automatic_thread_count(cpu_threads: int) -> int:
+    """Keep two logical CPU threads free when possible."""
+    if cpu_threads <= 2:
+        return 1
+    return max(1, cpu_threads - 2)
+
 
 def parse_cli() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -110,6 +127,16 @@ def parse_cli() -> argparse.Namespace:
         help=(
             "Optional exact results directory override. Default: "
             "results/<project>/validation/<run_id>/"
+        ),
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help=(
+            "CPU threads for tools that expose a thread option. If omitted, "
+            "the workflow detects the logical CPU threads available to the "
+            "process and keeps two threads free when possible."
         ),
     )
     parser.add_argument(
@@ -627,6 +654,7 @@ def write_validation_manifest(
     index_info: dict[str, object],
     selected_schemes: list[str],
     mfeprimer_parameters: dict[str, float | int] | None,
+    threads: int,
     run_result: dict[str, object],
 ) -> None:
     """Write a machine-readable provenance record for Workflow 02."""
@@ -677,6 +705,12 @@ def write_validation_manifest(
             "summary": portable_project_path(results_dir / "summary"),
         },
         "selected_assays": selected_schemes,
+        "threads": {
+            "supported_tools": int(threads),
+            "blastn": int(threads) if assay_mode == "qpcr" else "not applicable",
+            "seqkit_formatting": min(int(threads), 4),
+            "mfeprimer_full_qc": "no user CPU flag in MFEprimer 3.1 full-QC command",
+        },
         "mfeprimer_parameters": (
             {
                 "mode": "defaults",
@@ -1447,6 +1481,7 @@ def ensure_validation_tools_available(assay_mode: str) -> None:
 def format_target_database_for_mfeprimer(
     database: Path,
     database_workdir: Path,
+    threads: int,
 ) -> Path:
     """
     Write a one-sequence-per-line FASTA and verify that complete headers and
@@ -1461,7 +1496,19 @@ def format_target_database_for_mfeprimer(
     print("\n4. MFEprimer database formatting")
     print("================================")
     progress("Formatting database with SeqKit", "RUN")
-    run_command_to_file(["seqkit", "seq", "-w", "0", str(database)], temporary)
+    seqkit_threads = min(max(1, int(threads)), 4)
+    run_command_to_file(
+        [
+            "seqkit",
+            "seq",
+            "-j",
+            str(seqkit_threads),
+            "-w",
+            "0",
+            str(database),
+        ],
+        temporary,
+    )
 
     source_records = read_fasta_with_full_headers(database)
     formatted_records = read_fasta_with_full_headers(temporary)
@@ -2432,6 +2479,7 @@ def run_probe_blast(
     valid_amplicons_fasta: Path,
     valid_rows: list[dict[str, object]],
     scheme_dir: Path,
+    threads: int,
 ) -> tuple[Path, Path, int]:
     """
     Run blastn-short directly against amplicons_valid.fasta using -subject.
@@ -2476,6 +2524,8 @@ def run_probe_blast(
         str(max_targets),
         "-max_hsps",
         "20",
+        "-num_threads",
+        str(threads),
         "-outfmt",
         outfmt,
         "-out",
@@ -2502,6 +2552,7 @@ def run_probe_blast(
         print("Strands           : both")
         print("DUST              : disabled")
         print("E-value           : 1000")
+        print(f"Threads           : {threads}")
 
     run_command(command)
 
@@ -3850,6 +3901,7 @@ def analyse_probe_with_blast(
     valid_rows: list[dict[str, object]],
     scheme_dir: Path,
     total_target_sequences: int,
+    threads: int,
 ) -> dict[str, object]:
     """Run and summarize BLAST analysis for the original VarVAMP probe."""
     raw_file, query_file, variant_count = run_probe_blast(
@@ -3858,6 +3910,7 @@ def analyse_probe_with_blast(
         valid_amplicons_fasta,
         valid_rows,
         scheme_dir,
+        threads,
     )
 
     return summarize_probe_blast(
@@ -4504,6 +4557,7 @@ def run_mfeprimer_pairs(
     min_target_size: int | None,
     max_target_size: int | None,
     assay_mode: str,
+    threads: int,
 ) -> dict[str, object]:
     """
     Run validation in organized phases.
@@ -4771,6 +4825,7 @@ def run_mfeprimer_pairs(
                             analyses[scheme]["valid_rows"],
                             probe_scheme_dir,
                             total_target_sequences,
+                            threads,
                         )
                     else:
                         with redirect_stdout(StringIO()):
@@ -4781,6 +4836,7 @@ def run_mfeprimer_pairs(
                                 analyses[scheme]["valid_rows"],
                                 probe_scheme_dir,
                                 total_target_sequences,
+                                threads,
                             )
                     probe_results[scheme] = blast_analysis
                     progress(f"Probe BLAST {scheme}", "OK")
@@ -4995,6 +5051,22 @@ def main() -> int:
     VERBOSE = bool(cli.verbose)
 
     try:
+        cpu_threads = available_cpu_threads()
+        if cli.threads is None:
+            cli.threads = automatic_thread_count(cpu_threads)
+            thread_selection = "automatic"
+        else:
+            thread_selection = "manual"
+
+        if cli.threads <= 0:
+            raise ValueError("--threads must be greater than zero.")
+
+        if cli.threads > cpu_threads:
+            print(
+                f"Warning: --threads={cli.threads} exceeds the "
+                f"{cpu_threads} logical CPU threads currently available."
+            )
+
         (
             assay_mode,
             result_dir,
@@ -5032,7 +5104,11 @@ def main() -> int:
             f"Project: {project_name}\n"
             f"Validation run ID: {run_id}\n"
             f"Parent design run ID: {design_run_id}\n"
-            f"Design manifest: {compact_path(design_manifest_path)}\n",
+            f"Design manifest: {compact_path(design_manifest_path)}\n"
+            f"CPU threads available: {cpu_threads}\n"
+            f"Workflow threads: {cli.threads} ({thread_selection})\n"
+            f"SeqKit formatting threads: {min(cli.threads, 4)}\n"
+            f"BLAST threads: {cli.threads if assay_mode == 'qpcr' else 'N/A'}\n",
             encoding="utf-8",
         )
 
@@ -5045,6 +5121,11 @@ def main() -> int:
         print(f"Mode        : {assay_mode.upper()}")
         print(f"Work        : {compact_path(workdir)}")
         print(f"Results     : {compact_path(results_dir)}")
+        print(f"CPU         : {cpu_threads} logical threads available")
+        print(
+            f"Threads     : {cli.threads} used where supported "
+            f"({thread_selection})"
+        )
         print(
             "Flow: design manifest -> validation database -> length filter -> "
             "formatting -> indexing -> MFEprimer full QC -> coverage"
@@ -5102,6 +5183,7 @@ def main() -> int:
         database = format_target_database_for_mfeprimer(
             filtered_database,
             database_workdir,
+            cli.threads,
         )
         index_info = index_target_database(database)
 
@@ -5138,6 +5220,14 @@ def main() -> int:
             f"({index_info['detail']})"
         )
         print(f"Assays            : {', '.join(selected_schemes)}")
+        print(
+            f"CPU threads       : {cli.threads} for BLAST/supported tools; "
+            f"SeqKit formatting uses {min(cli.threads, 4)}"
+        )
+        print(
+            "MFEprimer threads : not user-configurable in the supported "
+            "MFEprimer 3.1 full-QC command"
+        )
 
         if parameters is None:
             print("MFEprimer search  : defaults (0-2000 bp; Tm >=30 °C)")
@@ -5175,6 +5265,7 @@ def main() -> int:
             min_target_size,
             max_target_size,
             assay_mode,
+            cli.threads,
         )
 
         validation_manifest = results_dir / "validation_manifest.json"
@@ -5198,6 +5289,7 @@ def main() -> int:
             index_info=index_info,
             selected_schemes=selected_schemes,
             mfeprimer_parameters=parameters,
+            threads=cli.threads,
             run_result=run_result,
         )
 

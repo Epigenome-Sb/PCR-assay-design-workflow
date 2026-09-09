@@ -84,6 +84,23 @@ VERBOSE = False
 WORKFLOW_LOG: Path | None = None
 
 
+def available_cpu_threads() -> int:
+    """Return the logical CPU threads available to this workflow process."""
+
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def automatic_thread_count(cpu_threads: int) -> int:
+    """Keep two logical CPU threads free when possible."""
+
+    if cpu_threads <= 2:
+        return 1
+    return max(1, cpu_threads - 2)
+
+
 def log_line(message: str) -> None:
     """Append one line to the workflow log when logging is active."""
     if WORKFLOW_LOG is None:
@@ -246,6 +263,7 @@ def write_project_manifest(
             "trimal_gap_threshold": args.trimal_gap_threshold,
             "min_occupancy": args.min_occupancy,
             "min_major_frequency": args.min_major_frequency,
+            "threads": int(args.threads),
         },
         "varvamp": {
             "executed": bool(varvamp_attempts)
@@ -317,6 +335,7 @@ def write_workflow_summary(
         f"Topology: {args.topology}",
         f"Redundancy: {args.redundancy}",
         f"Final MAFFT strategy: {args.mafft_strategy}",
+        f"Threads: {args.threads}",
         f"Trimming: {args.trimming}",
         f"Downstream alignment: {compact_path(downstream_alignment)}",
         "",
@@ -467,7 +486,16 @@ def parse_arguments() -> argparse.Namespace:
             "results/<project>/design/<run_id>."
         ),
     )
-    parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help=(
+            "Number of CPU threads used by supported tools. If omitted, the "
+            "workflow detects the logical CPU threads available to the process "
+            "and keeps two threads free when possible."
+        ),
+    )
     parser.add_argument(
         "--verbose",
         action="store_true",
@@ -1389,6 +1417,7 @@ def run_mars_rotation(
     workdir: Path,
     project_name: str,
     mars_executable: str,
+    threads: int,
 ) -> Path:
     """Run MARS on ungapped nucleotide sequences."""
 
@@ -1411,6 +1440,8 @@ def run_mars_rotation(
             str(mars_input),
             "-o",
             str(rotated_file),
+            "-T",
+            str(threads),
         ]
     )
 
@@ -3457,8 +3488,22 @@ def main() -> int:
     VERBOSE = bool(args.verbose)
 
     try:
+        cpu_threads = available_cpu_threads()
+
+        if args.threads is None:
+            args.threads = automatic_thread_count(cpu_threads)
+            thread_selection = "automatic"
+        else:
+            thread_selection = "manual"
+
         if args.threads <= 0:
             raise ValueError("--threads must be greater than zero.")
+
+        if args.threads > cpu_threads:
+            print(
+                f"Warning: --threads={args.threads} exceeds the "
+                f"{cpu_threads} logical CPU threads currently available."
+            )
 
         validate_fraction(args.min_occupancy, "--min-occupancy")
         validate_fraction(args.min_major_frequency, "--min-major-frequency")
@@ -3505,7 +3550,9 @@ def main() -> int:
             "VarVAMP assay-design workflow log\n"
             f"Project: {project_name}\n"
             f"Run ID: {run_id}\n"
-            f"Design FASTA: {compact_path(input_file)}\n",
+            f"Design FASTA: {compact_path(input_file)}\n"
+            f"CPU threads available: {cpu_threads}\n"
+            f"Workflow threads: {args.threads} ({thread_selection})\n",
             encoding="utf-8",
         )
 
@@ -3517,6 +3564,11 @@ def main() -> int:
         print(f"Input   : {compact_path(input_file)}")
         print(f"Work    : {compact_path(workdir)}")
         print(f"Results : {compact_path(results_dir)}")
+        print(f"CPU     : {cpu_threads} logical threads available")
+        print(
+            f"Threads : {args.threads} used by supported tools "
+            f"({thread_selection})"
+        )
         if VERBOSE:
             print(f"Log     : {WORKFLOW_LOG}")
 
@@ -3635,6 +3687,7 @@ def main() -> int:
                 preprocessing_workdir,
                 project_name,
                 args.mars_executable,
+                args.threads,
             )
             print_rotation_statistics(
                 calculate_cyclic_rotation_statistics(
@@ -3850,7 +3903,11 @@ def main() -> int:
         check_required_tools([("MAFFT", args.mafft_executable)])
         final_alignment = alignment_workdir / f"{project_name}_alignment.fasta"
 
-        print(f"Running final MAFFT alignment: {args.mafft_strategy}")
+        print(
+            f"Running final MAFFT alignment: {args.mafft_strategy} "
+            f"({args.threads} threads)",
+            flush=True,
+        )
         mafft_reported_strategy = run_final_mafft(
             redundancy_output,
             final_alignment,

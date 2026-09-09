@@ -1,36 +1,85 @@
 # PCR Assay Design and In Silico Validation Workflow
 
-A reproducible and interactive command-line workflow for nucleotide sequence preprocessing, multiple-sequence alignment, conservation analysis, VarVAMP assay design, and in silico validation.
+[![License: GPL v3+](https://img.shields.io/badge/License-GPLv3%2B-blue.svg)](LICENSE)
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](environment.yml)
+[![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](Dockerfile)
 
-The repository contains two complementary workflows:
+A reproducible command-line workflow for **PCR/qPCR assay design from variable nucleotide sequence datasets** and **in silico evaluation of primer-pair and probe coverage**.
 
-1. `01_varvamp_assay_design.py` — sequence preprocessing, alignment, conservation analysis, and assay design with VarVAMP.
+The repository connects sequence preprocessing, multiple-sequence alignment, conservation analysis, assay design with **VarVAMP**, primer-pair quality control with **MFEprimer**, and qPCR probe evaluation with **BLAST+** in a run-specific, provenance-aware workflow.
 
-2. `02_in_silico_validation.py` — primer-pair target coverage and, for qPCR designs, probe validation with MFEprimer and BLAST+.
-
-The workflow supports the three VarVAMP assay modes:
-
-- **SINGLE** — conventional PCR / individual amplicons;
-
-- **QPCR** — primer pairs with an internal qPCR probe;
-
-- **TILED** — overlapping amplicons for tiled sequencing.
+> **Scope.** This project performs computational assay design and in silico sequence-level validation. It does not replace experimental optimization or wet-lab validation of amplification efficiency, analytical sensitivity, analytical specificity, or diagnostic performance.
 
 ---
 
-## Scope
+## Overview
 
-This repository is designed for nucleotide FASTA datasets, including viral genomes, genes, genomic regions, bacterial genomes, and other comparable nucleotide sequence collections.
+The repository contains two complementary workflows.
 
-It is not intended for protein sequences.
+| Workflow | Purpose |
+|---|---|
+| `01_varvamp_assay_design.py` | Preprocess nucleotide sequences, generate a final multiple-sequence alignment, quantify conservation, and design assays with VarVAMP |
+| `02_in_silico_validation.py` | Evaluate selected primer pairs with MFEprimer and, for QPCR assays, evaluate the existing VarVAMP probe against retained PCR products with BLAST+ |
 
-The project performs computational assay design and in silico validation. Computational predictions alone do not establish diagnostic sensitivity, specificity, amplification efficiency, or clinical validity. Selected assays should ultimately be validated experimentally.
+Workflow 01 supports all three VarVAMP assay modes:
+
+- **SINGLE** — individual PCR amplicons
+- **QPCR** — primer pairs with an internal qPCR probe
+- **TILED** — overlapping amplicons for tiled sequencing
+
+The two workflows are connected by `assay_design_manifest.json`, allowing a completed design run to be selected explicitly during downstream validation.
 
 ---
 
-## Two-dataset design
+## Scientific workflow
 
-The workflows distinguish two biological sequence datasets with different roles.
+```text
+Design FASTA
+    │
+    ▼
+┌────────────────────────────────────┐
+│ Workflow 01 — Assay design         │
+└────────────────────────────────────┘
+    │
+    ├─ FASTA validation
+    ├─ Sequence orientation
+    ├─ Circular-sequence normalization (optional)
+    ├─ Redundancy handling
+    ├─ MAFFT multiple-sequence alignment
+    ├─ Alignment QC and optional trimAl trimming
+    ├─ Conservation analysis
+    └─ VarVAMP assay design
+           │
+           ▼
+   assay_design_manifest.json
+           │
+           │  reproducible handoff
+           ▼
+Validation FASTA
+    │
+    ▼
+┌────────────────────────────────────┐
+│ Workflow 02 — In silico validation │
+└────────────────────────────────────┘
+    │
+    ├─ Validation-database preparation
+    ├─ MFEprimer primer-pair QC
+    ├─ Predicted-product classification
+    ├─ PCR target-coverage analysis
+    └─ QPCR only
+         ├─ IUPAC probe expansion
+         ├─ blastn-short against retained PCR products
+         ├─ mismatch and alignment analysis
+         └─ combined PCR + probe coverage
+```
+
+The workflow deliberately keeps major scientific choices explicit instead of hiding them behind fixed defaults.
+
+---
+
+## Design and validation datasets
+
+The workflow distinguishes two sequence collections with different scientific roles:
 
 ```text
 data/
@@ -42,96 +91,42 @@ data/
 
 ### Design dataset
 
-`data/design/` contains the FASTA used by Workflow 01 for:
-
-- preprocessing;
-
-- multiple-sequence alignment;
-
-- conservation analysis;
-
-- VarVAMP assay design.
+`data/design/` contains the sequences used to construct the assay. Workflow 01 uses this dataset for preprocessing, alignment, conservation analysis, and VarVAMP design.
 
 ### Validation dataset
 
-`data/validation/` contains the FASTA used by Workflow 02 for:
+`data/validation/` contains the sequences used to evaluate the resulting assay. Workflow 02 uses this dataset for predicted PCR-product analysis, target coverage, and optional qPCR probe evaluation.
 
-- MFEprimer primer-pair validation;
+For a generalizability assessment, the validation dataset should ideally be **independent of**, and often larger or more diverse than, the design dataset.
 
-- PCR target-coverage calculation;
-
-- qPCR probe BLAST analysis.
-
-The validation dataset may be larger and more diverse than the design dataset. An independent validation dataset provides stronger evidence of assay generalizability than validation against the same sequences used for design.
+The reported coverage metrics always refer to the supplied validation dataset after any user-selected length filtering. They should not be interpreted as organism-level analytical specificity unless the validation database was deliberately constructed to answer that question.
 
 ---
 
-## Workflow overview
+## Key features
 
-```text
-data/design/<design_dataset>.fasta
-        │
-        ▼
-┌──────────────────────────────────────────────┐
-│ 01_varvamp_assay_design.py                   │
-└──────────────────────────────────────────────┘
-        │
-        ├── FASTA validation
-        ├── Sequence orientation
-        │      ├── keep
-        │      ├── MAFFT --adjustdirection
-        │      └── MAFFT --adjustdirectionaccurately
-        │
-        ├── Sequence topology
-        │      ├── linear
-        │      └── circular → MARS rotation
-        │
-        ├── Redundancy handling
-        │      ├── none
-        │      ├── SeqKit exact deduplication
-        │      └── CD-HIT-EST clustering
-        │
-        ├── Final MAFFT multiple-sequence alignment
-        ├── Alignment quality control
-        ├── Optional trimAl trimming
-        ├── Conservation analysis
-        └── VarVAMP assay design
-               ├── SINGLE
-               ├── QPCR
-               └── TILED
-                        │
-                        ▼
- results/<project>/design/<run_id>/
-        assay_design_manifest.json
-                        │
-                        │ reproducible handoff
-                        ▼
-data/validation/<validation_dataset>.fasta
-                        │
-                        ▼
-┌──────────────────────────────────────────────┐
-│ 02_in_silico_validation.py                   │
-└──────────────────────────────────────────────┘
-        │
-        ├── Select Workflow 01 design manifest
-        ├── Read VarVAMP assay mode and outputs
-        ├── Select validation FASTA
-        ├── Optional sequence-length filtering
-        ├── MFEprimer FASTA formatting
-        ├── MFEprimer database indexing
-        ├── Full MFEprimer primer QC
-        ├── Potential-product classification
-        ├── TARGET / SELF_PRIMING filtering decision
-        ├── PCR target-coverage calculation
-        └── QPCR only:
-               ├── expand existing IUPAC probe
-               ├── blastn-short on retained PCR products
-               ├── per-probe-variant statistics
-               ├── HitID × probe-variant matrix
-               └── global PCR + probe coverage
-```
-
-Scientific choices remain explicit during interactive execution.
+- Nucleotide FASTA validation with IUPAC ambiguity support
+- Optional orientation normalization with MAFFT
+- Optional cyclic start-position normalization of complete circular sequences with MARS
+- Redundancy handling with:
+  - no filtering
+  - SeqKit exact deduplication
+  - CD-HIT-EST clustering
+- Multiple MAFFT alignment strategies, from scalable progressive methods to high-accuracy iterative methods
+- Alignment QC and optional trimAl trimming
+- Per-position conservation analysis
+- VarVAMP `SINGLE`, `QPCR`, and `TILED` assay design
+- Run-specific result directories that avoid silent overwriting
+- Machine-readable design and validation manifests
+- MFEprimer 3.x primer-pair QC and predicted-product extraction
+- Product classification into `TARGET`, `SELF_PRIMING`, `CROSS_SCHEME`, and `OTHER`
+- PCR target coverage calculated from unique biological sequence identifiers (`HitID`)
+- QPCR probe evaluation only after primer-pair filtering
+- Expansion of existing IUPAC-degenerate probes into concrete A/C/G/T variants
+- `blastn-short` probe analysis with exact, mismatch, partial, and no-hit categories
+- Human-readable probe alignment reports and mismatch-position tables
+- Docker-based reproducible execution
+- Portable project-relative provenance paths for files stored inside the repository
 
 ---
 
@@ -153,6 +148,7 @@ PCR-assay-design-workflow/
 ├── .gitignore
 │
 ├── data/
+│   ├── README.md
 │   ├── design/
 │   └── validation/
 │
@@ -160,133 +156,36 @@ PCR-assay-design-workflow/
 └── results/
 ```
 
-The three storage areas have distinct roles:
+The storage areas have distinct purposes:
 
-```text
-data/      user-provided biological input datasets
-work/      generated, reconstructible intermediate files
-results/   permanent scientific outputs and provenance records
-```
+| Directory | Role |
+|---|---|
+| `data/` | User-provided biological input datasets |
+| `work/` | Reconstructible intermediate and technical files |
+| `results/` | Scientific outputs, summaries, logs, and provenance records |
 
-`work/` and `results/` may initially be empty. Their project/run subdirectories are created automatically by the workflows.
-
-The old `validation_inputs/` directory is no longer used.
-
----
-
-## Run-specific storage
-
-Every workflow execution receives a `run_id`.
-
-By default, it is a local timestamp such as:
-
-```text
-20260906_164500
-```
-
-Workflow 01 writes by default to:
+Each execution receives an isolated `run_id`, normally a timestamp such as `20260909_011500`.
 
 ```text
 work/<project>/design/<run_id>/
 results/<project>/design/<run_id>/
-```
 
-Workflow 02 writes by default to:
-
-```text
 work/<project>/validation/<run_id>/
 results/<project>/validation/<run_id>/
 ```
 
-This isolates successive runs and prevents normal timestamp-based executions from overwriting previous analyses.
-
-If a generated run ID already exists, a suffix such as `_02`, `_03`, etc. is added.
-
 ---
 
-## Requirements
+## Installation
 
-### Conda / pip dependencies
+### Docker — recommended
 
-The provided `environment.yml` installs the main workflow dependencies, including:
+Docker provides the most reproducible installation because the image includes the Conda environment together with MARS and the MFEprimer version expected by the current parser.
 
-- Python 3.11;
-- MAFFT;
-- CD-HIT-EST;
-- SeqKit;
-- trimAl;
-- BLAST+;
-- Biopython;
-- pandas;
-- matplotlib;
-- Pillow;
-- PyMuPDF;
-- VarVAMP 1.3.2.
-
-The Conda environment name used by the repository is:
-
-```text
-pcr-assay-design-workflow
-```
-
-The environment name must remain consistent between `environment.yml`, `Dockerfile`, and `compose.yaml`.
-
-### Additional external programs
-
-Two additional programs are required:
-
-**MARS** — used by Workflow 01 for cyclic start-position normalization of complete circular nucleotide sequences.
-
-**MFEprimer** — used by Workflow 02 for primer-pair QC, specificity analysis, and target-coverage analysis.
-
-For a native Conda installation, these programs must be installed separately and available in `PATH`.
-
-For the Docker installation provided by this repository, MARS and MFEprimer are installed automatically during image construction.
-
-The expected executable names are:
-
-```text
-mars
-mfeprimer
-```
-
-### MFEprimer compatibility note
-
-Workflow 02 currently parses the **legacy MFEprimer 3.x text report** for amplicon extraction, product classification, and the `Hairpin List` / `Dimer List` sections.
-
-The workflow can recognize both of these index layouts:
-
-```text
-<database>.primerqc.bin
-```
-
-or:
-
-```text
-<database>.primerqc
-<database>.primerqc.fai
-```
-
-Recognition of an index layout does **not** imply full MFEprimer 4.x report compatibility. If only a `.spec.tsv` report is produced, the current parser stops instead of silently interpreting an unsupported format.
-
-The Dockerfile currently installs MFEprimer 3.1.0 specifically to preserve compatibility with this parser.
-
----
-
-## Installation with Docker
-
-Docker is the simplest way to reproduce the complete software environment because the image contains the Conda environment plus MARS and MFEprimer.
-
-From the repository root, build the image:
+Build the image from the repository root:
 
 ```bash
 docker compose build
-```
-
-The two Compose services use the same image:
-
-```text
-pcr-assay-design-workflow:latest
 ```
 
 Run Workflow 01:
@@ -301,520 +200,54 @@ Run Workflow 02:
 docker compose run --rm validation
 ```
 
-The Compose configuration starts commands inside the `pcr-assay-design-workflow` Conda environment automatically. No manual `conda activate` is required for these commands.
+The repository is bind-mounted into the container, so ordinary edits to the Python scripts are immediately visible inside Docker. Rebuild the image after modifying `Dockerfile` or `environment.yml`.
 
-You can also run an explicit command:
+> **Architecture note**
+>
+> The current Dockerfile installs the MFEprimer 3.1.0 `linux-amd64` binary. The provided container workflow is therefore intended primarily for `amd64` / `x86_64` Docker hosts.
 
-```bash
-docker compose run --rm design python3 01_varvamp_assay_design.py
-docker compose run --rm validation python3 02_in_silico_validation.py
-```
+### Conda — native execution
 
-To open an interactive shell through the same environment:
-
-```bash
-docker compose run --rm validation bash
-```
-
-Then, for example:
-
-```bash
-python3 --version
-python3 02_in_silico_validation.py
-```
-
-The repository is bind-mounted at runtime:
-
-```yaml
-volumes:
-  - .:/app
-```
-
-Therefore edits made to the Python scripts in the local repository are visible immediately inside the container. Rebuilding is normally required after changing `Dockerfile` or `environment.yml`, but not after ordinary edits to the Python source files.
-
-### Docker input-data policy
-
-The default Docker configuration exposes the repository itself, including:
-
-```text
-data/design/
-data/validation/
-work/
-results/
-```
-
-For normal Docker usage, place design FASTA files under `data/design/` and validation FASTA files under `data/validation/`.
-
-Arbitrary host paths outside the repository, such as `/home/<user>/another_directory/`, are not mounted by default. This is intentional and keeps the default execution model reproducible and limited to the project directory.
-
-### Current Docker architecture note
-
-The current Dockerfile downloads the MFEprimer 3.1.0 `linux-amd64` binary. The provided build is therefore currently intended for `amd64`/`x86_64` Linux-compatible Docker execution.
-
----
-
-## Installation with Conda
-
-For native execution outside Docker, create the environment from the repository root:
+Create the environment:
 
 ```bash
 conda env create -f environment.yml
-```
-
-Activate it:
-
-```bash
 conda activate pcr-assay-design-workflow
 ```
 
-Verify the main Conda-installed programs:
+The Conda environment installs the main dependencies, including Python 3.11, MAFFT, CD-HIT-EST, SeqKit, trimAl, BLAST+, Biopython, pandas, matplotlib, Pillow, PyMuPDF, and VarVAMP.
 
-```bash
-python --version
-mafft --version
-cd-hit-est -h
-seqkit version
-trimal --version
-blastn -version
-varvamp --help
-```
-
-MARS and MFEprimer are not installed by `environment.yml`; install them separately for native execution and verify that they are available in `PATH`:
-
-```bash
-mars --help
-mfeprimer --help
-```
+For native execution, **MARS** and **MFEprimer** must additionally be installed and available in `PATH`.
 
 ---
 
-## Input data
+## Quick start
 
-### Workflow 01 input
-
-Place the assay-design FASTA under:
+### 1. Add the design dataset
 
 ```text
-data/design/
+data/design/my_design_dataset.fasta
 ```
 
-For example:
-
-```text
-data/design/hdv_design.fasta
-```
-
-FASTA record IDs must be unique so sequences can be tracked through orientation and circular-rotation steps.
-
-Accepted sequence characters include standard DNA/RNA nucleotides and IUPAC ambiguity codes.
-
-### Workflow 02 input
-
-Place the validation FASTA under:
-
-```text
-data/validation/
-```
-
-For example:
-
-```text
-data/validation/hdv_validation.fasta
-```
-
-Workflow 02 keeps the design dataset and validation dataset conceptually separate.
-
-For reproducible studies, document accession numbers, source database, retrieval date, search strategy, inclusion/exclusion criteria, genotype or lineage information, sequence completeness, and the analysed genomic region.
-
----
-
-# Workflow 01 — Assay design
-
-## Interactive execution
+Run:
 
 ```bash
 python3 01_varvamp_assay_design.py
 ```
 
-Workflow 01 lists suitable FASTA files found under `data/design/`.
-
-For detailed external commands and paths:
+or with Docker:
 
 ```bash
-python3 01_varvamp_assay_design.py --verbose
+docker compose run --rm design
 ```
 
-The run-specific log is written to:
+The workflow interactively asks for the major preprocessing, alignment, trimming, and VarVAMP design choices.
+
+### 2. Add the validation dataset
 
 ```text
-results/<project>/design/<run_id>/workflow.log
+data/validation/my_validation_dataset.fasta
 ```
-
-### Project name
-
-By default, the project name is derived from the input FASTA filename.
-
-For example:
-
-```text
-hdv_design.fasta
-```
-
-produces the project name:
-
-```text
-hdv_design
-```
-
-To use a shorter shared project namespace for design and validation, specify it explicitly:
-
-```bash
---project-name hdv
-```
-
----
-
-## Step 1 — Sequence orientation
-
-The workflow allows three strategies:
-
-```text
-1. Keep the original orientation
-2. MAFFT --adjustdirection
-3. MAFFT --adjustdirectionaccurately
-```
-
-Orientation normalization statistics are reported when MAFFT orientation correction is used.
-
----
-
-## Step 2 — Sequence topology
-
-The workflow asks whether sequences are `linear` or `circular`.
-
-For complete circular datasets, MARS can normalize cyclic start positions before the final alignment.
-
-MARS changes the cyclic start position of a sequence; it does not change the biological nucleotide content.
-
----
-
-## Step 3 — Redundancy handling
-
-Supported strategies are:
-
-```text
-none
-SeqKit exact deduplication
-CD-HIT-EST clustering
-```
-
-For CD-HIT-EST, the user can control:
-
-- identity threshold;
-
-- clustering mode;
-
-- strand comparison.
-
-The supported CD-HIT-EST identity range is:
-
-```text
-0.80 to 1.00
-```
-
-A compatible word size is selected automatically.
-
----
-
-## Step 4 — Final MAFFT alignment
-
-Supported strategies include:
-
-```text
-Auto
-FFT-NS-1
-FFT-NS-2
-FFT-NS-i (2 cycles)
-FFT-NS-i (up to 1000 cycles)
-NW-NS-2
-NW-NS-i (2 cycles)
-NW-NS-i (up to 1000 cycles)
-L-INS-i
-G-INS-i
-E-INS-i
-NW-NS-PartTree-1
-```
-
-The workflow records the requested strategy and, when detectable, the strategy reported by MAFFT.
-
----
-
-## Step 5 — Alignment QC and trimAl
-
-The workflow calculates:
-
-- alignment length;
-
-- mean gap content;
-
-- columns with high gap fractions;
-
-- fully occupied columns;
-
-- sequence occupancy;
-
-- low-occupancy sequence counts.
-
-A transparent heuristic assessment is displayed before trimming.
-
-Available trimAl strategies are:
-
-```text
--noallgaps
--gappyout
--automated1
--gt VALUE
-no trimming
-```
-
----
-
-## Conservation analysis
-
-For each alignment position, Workflow 01 calculates:
-
-- A/C/G/T counts;
-
-- gap count;
-
-- ambiguous-character count;
-
-- occupancy;
-
-- major base;
-
-- major-base frequency;
-
-- Shannon entropy;
-
-- strict conservation;
-
-- threshold-based conservation.
-
-Default thresholds:
-
-```text
-minimum occupancy       = 0.95
-minimum major frequency = 0.95
-```
-
-They can be changed with:
-
-```bash
---min-occupancy
---min-major-frequency
-```
-
----
-
-## VarVAMP assay design
-
-Workflow 01 supports all three VarVAMP modes.
-
-### SINGLE
-
-Conventional PCR / individual amplicon design.
-
-### QPCR
-
-Primer-pair plus internal-probe design.
-
-Main parameters include:
-
-```text
--t     VarVAMP consensus threshold
--a     maximum ambiguous positions per primer
--pa    maximum ambiguous positions in the probe
-```
-
-### TILED
-
-Overlapping tiled-amplicon design.
-
-If VarVAMP fails to produce a scheme during an interactive run, the workflow can adjust VarVAMP parameters and retry **only the VarVAMP stage**. Earlier preprocessing, alignment, trimming, and conservation steps are reused.
-
-Custom VarVAMP configuration files created during a run are stored with the run for provenance.
-
----
-
-## Workflow 01 output organization
-
-For a project called `hdv`, a run may create:
-
-```text
-work/
-└── hdv/
-    └── design/
-        └── 20260906_164500/
-            ├── preprocessing/
-            ├── alignment/
-            └── varvamp/
-                ├── attempt_01_qpcr/
-                └── ...
-results/
-└── hdv/
-    └── design/
-        └── 20260906_164500/
-            ├── preprocessing/
-            ├── alignment/
-            ├── conservation/
-            ├── config/
-            ├── varvamp/
-            │   ├── assay_mode.txt
-            │   ├── assay_design_manifest.json
-            │   └── <VarVAMP outputs>
-            ├── assay_design_manifest.json
-            ├── workflow_summary.txt
-            └── workflow.log
-```
-
-**###** `**work/**`
-
-Contains reconstructible technical/intermediate files, including orientation files, MARS inputs, redundancy-processing files, MAFFT working alignments, and VarVAMP attempt directories.
-
-**###** `**results/**`
-
-Contains permanent scientific outputs and provenance records.
-
-Typical result groups are:
-
-```text
-preprocessing/
-alignment/
-conservation/
-config/
-varvamp/
-```
-
----
-
-## Assay-design manifest
-
-At the end of Workflow 01, the script generates:
-
-```text
-results/<project>/design/<run_id>/assay_design_manifest.json
-```
-
-A copy is also placed inside the successful `varvamp/` result directory.
-
-The manifest uses schema version 2 and records information including:
-
-- workflow stage;
-
-- project name;
-
-- run ID;
-
-- design FASTA path;
-
-- SHA-256 of the design FASTA;
-
-- work and results directories;
-
-- sequence counts;
-
-- orientation strategy;
-
-- topology;
-
-- redundancy strategy;
-
-- MAFFT strategy;
-
-- trimAl strategy;
-
-- conservation thresholds;
-
-- VarVAMP mode and parameters;
-
-- VarVAMP attempts;
-
-- VarVAMP result directory;
-
-- software versions;
-
-- workflow log.
-
-Workflow 02 uses the run-level manifest as the reproducible handoff from assay design to validation.
-
-### Manifest path portability
-
-For files located inside the repository, Workflow 01 stores manifest paths relative to the repository root, for example:
-
-```text
-results/hdv/design/20260906_164500/varvamp
-work/hdv/design/20260906_164500
-data/design/hdv_design.fasta
-```
-
-This avoids embedding execution-specific prefixes such as `/app/...` from Docker or `/home/<user>/...` from a native installation.
-
-A truly external input path remains absolute because it cannot be represented safely relative to the project.
-
-The manifest records the path policy with:
-
-```json
-"path_base": "repository_root",
-"path_policy": "repository-relative when inside the project; absolute only for external paths"
-```
-
-Workflow 02 also contains a compatibility fallback for older Workflow 01 manifests that stored absolute Docker paths such as `/app/results/...`. If the equivalent project-relative path exists in the current repository, it is remapped automatically.
-
-
----
-
-## Non-interactive execution of Workflow 01
-
-Example for a qPCR design:
-
-```bash
-python3 01_varvamp_assay_design.py \
-  --input data/design/hdv_design.fasta \
-  --project-name hdv \
-  --orientation accurate \
-  --topology circular \
-  --redundancy cdhit \
-  --identity 0.95 \
-  --cdhit-mode accurate \
-  --cdhit-strand both \
-  --mafft-strategy auto \
-  --trimming none \
-  --varvamp-mode qpcr \
-  --varvamp-threshold 0.95 \
-  --primer-ambiguity 2 \
-  --probe-ambiguity 2 \
-  --threads 8
-```
-
-An optional run ID can be supplied:
-
-```bash
---run-id hdv_qpcr_test
-```
-
-Custom exact work/results directories can also be supplied with:
-
-```bash
---workdir
---results
-```
-
----
-
-# Workflow 02 — In silico validation
-
-## Interactive execution
 
 Run:
 
@@ -822,164 +255,200 @@ Run:
 python3 02_in_silico_validation.py
 ```
 
-Detailed mode:
+or with Docker:
 
 ```bash
-python3 02_in_silico_validation.py --verbose
+docker compose run --rm validation
 ```
 
-Workflow 02 first searches for run-level manifests under:
+Workflow 02 lists completed Workflow 01 design runs, reads the selected assay-design manifest, and then evaluates the chosen assay against the validation dataset.
 
-```text
-results/<project>/design/<run_id>/assay_design_manifest.json
-```
-
-It displays the available completed design runs and reads the selected VarVAMP mode and result directory from the manifest.
-
-Workflow 02 then selects the validation FASTA, normally from:
-
-```text
-data/validation/
-```
+Use `--verbose` with either script to display complete external commands and detailed paths. Commands are also retained in the run-specific log files.
 
 ---
 
-## Explicit design and validation inputs
+# Workflow 01 — Assay design
 
-A specific Workflow 01 run and validation database can be supplied directly:
+## 1. Input validation
+
+Workflow 01 accepts nucleotide FASTA data containing standard nucleotides and IUPAC ambiguity codes.
+
+FASTA record identifiers should be unique so that sequences can be tracked consistently through preprocessing and downstream analyses.
+
+## 2. Sequence orientation
+
+Available strategies are:
+
+- keep the original orientation
+- MAFFT `--adjustdirection`
+- MAFFT `--adjustdirectionaccurately`
+
+Orientation normalization is useful when sequences representing the same biological region are not consistently provided in the same strand orientation.
+
+## 3. Sequence topology
+
+Datasets can be treated as:
+
+- **linear**
+- **circular**
+
+For complete circular sequences, MARS can cyclically shift sequence starts before the final multiple-sequence alignment. This changes the linearization start position, not the biological nucleotide content.
+
+## 4. Redundancy handling
+
+Three strategies are available:
+
+- no redundancy reduction
+- exact duplicate removal with SeqKit
+- similarity-based clustering with CD-HIT-EST
+
+For CD-HIT-EST, the workflow exposes identity threshold, clustering mode, and strand comparison as explicit scientific parameters.
+
+## 5. Final multiple-sequence alignment
+
+Workflow 01 provides a range of MAFFT strategies, including:
+
+- Auto
+- FFT-NS-1
+- FFT-NS-2
+- FFT-NS-i
+- NW-NS-2
+- NW-NS-i
+- L-INS-i
+- G-INS-i
+- E-INS-i
+- NW-NS-PartTree-1
+
+The selected strategy is recorded for provenance.
+
+### Computational resources
+
+Workflow 01 supports multithreaded execution for tools that expose a thread option.
+
+In the current version, if `--threads` is omitted, the script detects the logical CPU threads available to the process and keeps two threads free when possible. A fixed value can still be requested explicitly:
 
 ```bash
-python3 02_in_silico_validation.py \
-  --design-manifest results/hdv/design/<design_run_id>/assay_design_manifest.json \
-  --validation-db data/validation/hdv_validation.fasta
+python3 01_varvamp_assay_design.py --threads 8
 ```
 
-These options preselect the two main input sources. The remaining scientific validation decisions remain interactive.
+The selected thread count is displayed at startup and recorded with the run.
 
-An optional validation run ID can also be supplied:
+## 6. Alignment QC and optional trimming
+
+The workflow calculates alignment-level quality metrics, including:
+
+- alignment length
+- gap content
+- highly gapped columns
+- fully occupied columns
+- per-sequence occupancy
+- low-occupancy sequence counts
+
+Optional trimAl strategies include:
+
+- `-noallgaps`
+- `-gappyout`
+- `-automated1`
+- manual gap-threshold filtering
+- no trimming
+
+## 7. Conservation analysis
+
+For each alignment position, Workflow 01 calculates:
+
+- A/C/G/T counts
+- gap count
+- ambiguous-character count
+- occupancy
+- major base
+- major-base frequency
+- Shannon entropy
+- strict conservation
+- threshold-based conservation
+
+Default thresholds are:
+
+```text
+minimum occupancy       = 0.95
+minimum major frequency = 0.95
+```
+
+They can be modified with:
 
 ```bash
---run-id validation_test
+--min-occupancy
+--min-major-frequency
 ```
+
+## 8. VarVAMP assay design
+
+Workflow 01 supports all VarVAMP modes:
+
+| Mode | Intended design |
+|---|---|
+| `SINGLE` | Individual PCR amplicons |
+| `QPCR` | Primer pair plus internal qPCR probe |
+| `TILED` | Overlapping tiled amplicons |
+
+The workflow exposes the VarVAMP consensus threshold and ambiguity limits, as well as mode-specific options.
+
+If a VarVAMP attempt fails during an interactive run, design parameters can be adjusted and **only the VarVAMP stage is retried**; the preceding preprocessing and alignment stages do not need to be recomputed.
 
 ---
 
-## Validation database preparation
+# Workflow 02 — In silico validation
 
-Workflow 02 first summarizes the selected validation FASTA.
+Workflow 02 consumes:
 
-The user can then choose to:
+1. a completed Workflow 01 `assay_design_manifest.json`
+2. a validation FASTA dataset
 
-```text
-1. Keep all sequences
-2. Keep sequences above a relative fraction of the maximum sequence length
-3. Apply a custom minimum sequence length
-```
+Its purpose is to measure sequence-level assay coverage in the supplied validation collection while retaining the exact design-to-validation provenance relationship.
 
-The relative-length option is an operational sequence-length criterion. It does not prove biological completeness.
+## 1. Validation-database preparation
 
-If filtering is applied, the retained FASTA is written under the validation run's `work/` directory.
+The workflow summarizes the selected validation FASTA and optionally allows sequence-length filtering.
 
----
+The retained dataset is then reformatted for MFEprimer using SeqKit without changing sequence content or FASTA identifiers.
 
-## MFEprimer database formatting
+MFEprimer indexes and other reconstructible database files remain in the run-specific `work/` directory.
 
-Only the final retained validation set is formatted for MFEprimer.
+## 2. Primer-pair QC with MFEprimer
 
-SeqKit is used to convert the FASTA to one sequence line per record:
+For each selected assay, Workflow 02 runs the LEFT and RIGHT primers through MFEprimer.
 
-```bash
-seqkit seq -w 0
-```
+The current parser expects the **legacy MFEprimer 3.x text report**, including the `Hairpin List` and `Dimer List` sections.
 
-Workflow 02 verifies that:
+The qPCR probe is **not** included in this MFEprimer primer hairpin/dimer analysis.
 
-- complete FASTA headers are preserved;
+## 3. Predicted-product classification
 
-- sequence order is preserved;
+MFEprimer-predicted products are classified as:
 
-- sequence content is preserved;
+| Class | Interpretation |
+|---|---|
+| `TARGET` | LEFT × RIGHT or RIGHT × LEFT from the selected scheme |
+| `SELF_PRIMING` | LEFT × LEFT or RIGHT × RIGHT |
+| `CROSS_SCHEME` | Recognized primers belonging to different schemes |
+| `OTHER` | Product that cannot be safely assigned to the selected assay |
 
-- IUPAC characters are preserved.
-
-The formatted FASTA and MFEprimer index files are technical/reconstructible files and therefore remain under:
+The user can choose whether downstream coverage uses:
 
 ```text
-work/<project>/validation/<run_id>/database/
+TARGET only
 ```
 
-If the formatted FASTA content changes inside a reused run directory, recognized adjacent MFEprimer indexes are invalidated rather than silently reused against changed content.
-
----
-
-## MFEprimer validation
-
-Workflow 02 runs the full MFEprimer command for each selected primer pair:
+or:
 
 ```text
-mfeprimer -i <primers.fasta> -d <database.fasta> -o <output>
+TARGET + SELF_PRIMING
 ```
 
-The workflow expects the legacy text report to contain both:
+`CROSS_SCHEME` and `OTHER` products are never treated as valid products for the selected assay.
 
-```text
-Hairpin List
-Dimer List
-```
+## 4. PCR target coverage
 
-If these expected QC sections are missing, the workflow stops before downstream product filtering.
-
-For qPCR assays, this MFEprimer secondary-structure QC concerns the **LEFT and RIGHT primers** supplied to MFEprimer. The qPCR probe is not included in this hairpin/dimer check.
-
----
-
-## Potential-product classification
-
-Before downstream filtering, Workflow 02 displays all potential products reported by MFEprimer.
-
-Products are classified as:
-
-```text
-TARGET
-SELF_PRIMING
-CROSS_SCHEME
-OTHER
-```
-
-Definitions:
-
-```text
-TARGET
-LEFT×RIGHT or RIGHT×LEFT from the selected scheme
-SELF_PRIMING
-LEFT×LEFT or RIGHT×RIGHT from the selected scheme
-CROSS_SCHEME
-recognized primer roles from different schemes
-OTHER
-a product that cannot be safely interpreted as belonging to the selected assay
-```
-
-The workflow then asks:
-
-```text
-Apply the TARGET-only filter before coverage and probe analysis? [y/n]:
-```
-
-If `yes`, only `TARGET` products are retained.
-
-If `no`, `TARGET + SELF_PRIMING` products are retained.
-
-`CROSS_SCHEME` and `OTHER` are never treated as valid products for the selected assay.
-
-Class-specific unique HitID counts are not necessarily additive because the same biological sequence can generate more than one product class.
-
----
-
-## PCR target coverage
-
-The biological denominator is the **final retained validation database after sequence-length filtering**.
-
-PCR coverage is calculated from unique HitIDs:
+PCR coverage is calculated from **unique retained HitIDs**, not raw amplicon counts:
 
 ```text
 PCR coverage
@@ -989,52 +458,38 @@ unique retained PCR-positive HitIDs
 number of sequences in the final retained validation database
 ```
 
-This avoids counting the same biological target multiple times when MFEprimer predicts multiple retained amplicons for one HitID.
+This prevents a biological sequence from being counted multiple times when MFEprimer predicts more than one retained product for the same HitID.
 
----
+## 5. QPCR probe validation
 
-## QPCR probe validation
+For QPCR designs, the existing VarVAMP probe can be evaluated after primer-pair filtering.
 
-For QPCR designs, Workflow 02 can additionally validate the existing VarVAMP probe with local BLAST+.
-
-The prompt is:
+Probe analysis is therefore conditional on PCR positivity:
 
 ```text
-Test the existing VarVAMP probe(s) on the retained PCR products? [y/n]:
+validation database
+      │
+      ▼
+MFEprimer primer-pair analysis
+      │
+      ▼
+retained PCR products
+      │
+      ▼
+probe BLAST
 ```
 
-Probe validation is performed only on retained PCR products.
+### IUPAC-degenerate probes
 
----
+If the original VarVAMP probe contains ambiguous IUPAC positions, Workflow 02 expands that **existing probe** into all compatible concrete A/C/G/T sequences.
 
-## IUPAC-degenerate probes
+The workflow does not redesign the probe and does not introduce new ambiguity.
 
-If a VarVAMP probe contains ambiguous IUPAC positions, Workflow 02 expands the **existing** probe into every compatible concrete A/C/G/T sequence before BLAST.
+### Probe BLAST categories
 
-For example:
+Concrete probe variants are searched against retained PCR products with `blastn-short`.
 
-```text
-Y = C/T
-K = G/T
-```
-
-A probe containing one `Y` and one `K` generates four concrete probe variants.
-
-No new ambiguity is proposed and the original probe is not redesigned.
-
----
-
-## Probe BLAST
-
-Concrete probe variants are searched with:
-
-```text
-blastn-short
-```
-
-against the retained MFEprimer amplicons.
-
-The reported categories are:
+Results are classified as:
 
 ```text
 0_MISMATCH
@@ -1045,374 +500,277 @@ PARTIAL_ONLY
 NO_HIT
 ```
 
-A **full-length ungapped** probe site requires:
+A **full-length ungapped site** requires the complete probe query to align without gaps. It may still contain mismatches and should therefore not be interpreted as proof of efficient probe hybridization.
 
-- query start = 1;
+### Probe outputs
 
-- query end = full probe length;
-
-- alignment length = full probe length;
-
-- zero gap openings.
-
-`Full-site` therefore means a full-length ungapped BLAST alignment and may still contain three or more mismatches. It is a descriptive sequence-match category, not a prediction of wet-lab probe performance.
-
----
-
-## Per-probe-variant analysis
-
-Every concrete probe sequence is evaluated independently.
-
-Workflow 02 reports technical counts among retained amplicons and biological counts at unique-PCR-positive-HitID level.
-
-The files include:
+For each QPCR assay, Workflow 02 reports both amplicon-level and unique-HitID-level results and writes, among other files:
 
 ```text
+probe_blast_raw.tsv
+probe_blast_amplicon_summary.tsv
+probe_blast_hitid_summary.tsv
+probe_blast_alignments_by_amplicon.txt
+probe_blast_alignments_by_hitid.txt
+probe_blast_mismatch_positions.tsv
 probe_variant_statistics.tsv
 probe_variant_hitid_matrix.tsv
+probe_blast_summary.txt
 ```
 
-One target may match more than one concrete probe variant. Therefore per-variant rows must not be added together to calculate global biological coverage.
+The human-readable alignment reports make it possible to inspect the probe/target alignments and mismatch positions directly.
 
-For final qPCR coverage, the best result across all concrete variants is retained once per unique HitID.
+## 6. Combined PCR + probe coverage
 
----
-
-## Final qPCR coverage
-
-The denominator is the **final retained validation database after any sequence-length filtering**.
-
-For a final validation set containing `N` sequences:
+For a final validation database containing `N` retained sequences:
 
 ```text
 PCR
-= unique retained PCR-positive HitIDs / N
+= unique PCR-positive HitIDs / N
+
 PCR + probe exact
-= PCR-positive HitIDs whose best concrete probe variant has 0 mismatches / N
-PCR + probe <=1 MM
-= PCR-positive HitIDs whose best concrete probe variant has 0 or 1 mismatch / N
-PCR + probe <=2 MM
-= PCR-positive HitIDs whose best concrete probe variant has 0, 1, or 2 mismatches / N
+= PCR-positive HitIDs with a best concrete probe match of 0 mismatches / N
+
+PCR + probe <=1 mismatch
+= PCR-positive HitIDs with a best concrete probe match of <=1 mismatch / N
+
+PCR + probe <=2 mismatches
+= PCR-positive HitIDs with a best concrete probe match of <=2 mismatches / N
+
 PCR + full probe site
 = PCR-positive HitIDs with a full-length ungapped probe alignment / N
 ```
 
-These are sequence-level computational coverage metrics. They do not establish wet-lab sensitivity or efficiency.
+When several concrete IUPAC-derived probe variants match the same biological sequence, the target is counted only once using its best probe result.
 
 ---
 
-## Workflow 02 output organization
+## Main outputs
 
-For a project called `hdv`, a validation run may create:
+### Workflow 01
+
+The principal scientific results are stored under:
 
 ```text
-work/
-└── hdv/
-    └── validation/
-        └── 20260906_171000/
-            ├── assay_inputs/
-            │   ├── primer_pairs/
-            │   ├── probes/
-            │   ├── schemes/
-            │   └── manifest.tsv
-            │
-            └── database/
-                ├── <filtered_database>.fasta
-                ├── <formatted_database>_fixed.fasta
-                └── <MFEprimer index files>
-results/
-└── hdv/
-    └── validation/
-        └── 20260906_171000/
-            ├── inputs/
-            │   ├── assay_design_manifest.json
-            │   ├── assay_manifest.tsv
-            │   └── validation_database.tsv
-            │
-            ├── mfeprimer/
-            │   └── <scheme>/
-            │       ├── <raw MFEprimer report>
-            │       ├── amplicons_all.tsv
-            │       ├── amplicons_valid.tsv
-            │       ├── amplicons_valid.fasta
-            │       ├── positive_hitids.txt
-            │       ├── non_target_products.tsv
-            │       └── coverage_summary.txt
-            │
-            ├── probe_blast/
-            │   └── <scheme>/
-            │       ├── probe_blast_queries.fasta
-            │       ├── probe_blast_raw.tsv
-            │       ├── probe_blast_amplicon_summary.tsv
-            │       ├── probe_blast_hitid_summary.tsv
-            │       ├── probe_blast_alignments_by_amplicon.txt
-            │       ├── probe_blast_alignments_by_hitid.txt
-            │       ├── probe_blast_mismatch_positions.tsv
-            │       ├── probe_blast_summary.txt
-            │       ├── probe_variant_statistics.tsv
-            │       └── probe_variant_hitid_matrix.tsv
-            │
-            ├── summary/
-            │   ├── mfeprimer_runs.tsv
-            │   ├── coverage_results.tsv
-            │   ├── secondary_structure_summary.tsv
-            │   └── secondary_structure_details.tsv
-            │
-            ├── validation_manifest.json
-            └── validation.log
+results/<project>/design/<run_id>/
 ```
 
-Probe-specific files are generated only for QPCR runs in which probe validation is performed.
+They include:
 
----
+- final multiple-sequence alignment
+- alignment QC outputs
+- conservation tables and visualizations
+- selected VarVAMP output tree
+- `assay_design_manifest.json`
+- `workflow_summary.txt`
+- `workflow.log`
 
-## Validation manifest
+### Workflow 02
 
-Workflow 02 writes:
+The principal validation results are stored under:
 
 ```text
-results/<project>/validation/<run_id>/validation_manifest.json
+results/<project>/validation/<run_id>/
 ```
 
-The manifest uses schema version 2 and records information including:
+The main cross-assay summary is:
 
-- workflow stage;
+```text
+summary/coverage_results.tsv
+```
 
-- project name;
+Additional result groups contain:
 
-- validation run ID;
+- MFEprimer reports and retained amplicons
+- positive HitID lists
+- non-target product tables
+- primer secondary-structure summaries
+- qPCR probe BLAST results and alignments
+- mismatch-position tables
+- per-probe-variant statistics
+- `validation_manifest.json`
+- `validation.log`
 
-- parent design run ID;
+<details>
+<summary><strong>Example validation result structure</strong></summary>
 
-- parent assay-design manifest;
+```text
+results/<project>/validation/<run_id>/
+├── inputs/
+│   ├── assay_design_manifest.json
+│   ├── assay_manifest.tsv
+│   └── validation_database.tsv
+│
+├── mfeprimer/
+│   └── <scheme>/
+│       ├── <raw MFEprimer report>
+│       ├── amplicons_all.tsv
+│       ├── amplicons_valid.tsv
+│       ├── amplicons_valid.fasta
+│       ├── positive_hitids.txt
+│       ├── non_target_products.tsv
+│       └── coverage_summary.txt
+│
+├── probe_blast/
+│   └── <scheme>/
+│       ├── probe_blast_queries.fasta
+│       ├── probe_blast_raw.tsv
+│       ├── probe_blast_amplicon_summary.tsv
+│       ├── probe_blast_hitid_summary.tsv
+│       ├── probe_blast_alignments_by_amplicon.txt
+│       ├── probe_blast_alignments_by_hitid.txt
+│       ├── probe_blast_mismatch_positions.tsv
+│       ├── probe_blast_summary.txt
+│       ├── probe_variant_statistics.tsv
+│       └── probe_variant_hitid_matrix.tsv
+│
+├── summary/
+│   ├── mfeprimer_runs.tsv
+│   ├── coverage_results.tsv
+│   ├── secondary_structure_summary.tsv
+│   └── secondary_structure_details.tsv
+│
+├── validation_manifest.json
+└── validation.log
+```
 
-- VarVAMP mode and result directory;
-
-- design FASTA and design SHA-256 from Workflow 01;
-
-- source validation FASTA;
-
-- validation FASTA SHA-256;
-
-- raw database statistics;
-
-- sequence-length filter;
-
-- retained validation FASTA and statistics;
-
-- MFEprimer-formatted FASTA;
-
-- MFEprimer index status and files;
-
-- selected assays;
-
-- MFEprimer parameters;
-
-- coverage denominator;
-
-- TARGET-only filtering decision;
-
-- probe-validation decision;
-
-- summary files;
-
-- tool versions;
-
-- validation log.
-
-This provides an explicit parent-child provenance relationship between the assay-design run and its validation run.
-
-As with Workflow 01, paths located inside the repository are written relative to the repository root whenever possible. This keeps validation provenance portable between Docker, native execution, and a repository moved to another filesystem location.
-
+</details>
 
 ---
 
-## Reproducibility
+## Reproducibility and provenance
 
-For reproducible analysis, retain or report:
+Each run is isolated by project, workflow stage, and `run_id`.
 
-1. design sequence database and retrieval date;
-
-2. design sequence accession numbers;
-
-3. inclusion and exclusion criteria;
-
-4. genotype / lineage information;
-
-5. sequence completeness;
-
-6. orientation strategy;
-
-7. sequence topology;
-
-8. MARS use, when applicable;
-
-9. redundancy strategy;
-
-10. CD-HIT-EST parameters, when applicable;
-
-11. MAFFT strategy;
-
-12. alignment QC;
-
-13. trimAl strategy and threshold, when applicable;
-
-14. conservation-analysis thresholds;
-
-15. VarVAMP mode;
-
-16. VarVAMP consensus threshold;
-
-17. primer ambiguity limit;
-
-18. probe ambiguity limit for QPCR;
-
-19. mode-specific VarVAMP parameters;
-
-20. software versions;
-
-21. validation sequence database and retrieval date;
-
-22. validation FASTA SHA-256;
-
-23. sequence-length filtering strategy;
-
-24. MFEprimer indexing and search parameters;
-
-25. TARGET-only versus TARGET + SELF_PRIMING decision;
-
-26. PCR coverage on the final retained validation set;
-
-27. qPCR probe BLAST parameters and mismatch statistics;
-
-28. concrete IUPAC probe variants;
-
-29. parent design run ID and validation run ID;
-
-30. experimental validation of the selected assay.
-
-Workflow 01 records many of these settings in:
+The workflow records provenance through:
 
 ```text
 assay_design_manifest.json
+validation_manifest.json
 workflow_summary.txt
 workflow.log
-```
-
-Workflow 02 records its validation provenance in:
-
-```text
-validation_manifest.json
 validation.log
-inputs/
-summary/
 ```
+
+The manifests are designed to preserve information such as:
+
+- source FASTA paths
+- sequence counts
+- dataset SHA-256 checksums
+- preprocessing decisions
+- alignment strategy
+- conservation thresholds
+- VarVAMP mode and parameters
+- selected assays
+- validation database and filtering
+- MFEprimer settings
+- PCR coverage denominator
+- probe-validation status
+- software versions
+- parent design run and validation run identifiers
+
+Paths for files located inside the project are stored relative to the repository root whenever possible, improving portability between native execution, Docker, and relocated project directories.
+
+For publication-quality analyses, retain the original accession list and document the source database, retrieval date, inclusion/exclusion criteria, lineage/genotype composition, sequence completeness criteria, and all user-selected scientific parameters.
 
 ---
 
-## Important interpretation notes
+## Scientific interpretation and limitations
 
-**Cluster representatives:** if clustering is used for design, validation should ideally be assessed against the original or another appropriate validation dataset rather than only against cluster representatives.
+### In silico coverage is not wet-lab performance
 
-**Circular genomes:** arbitrary FASTA start positions can affect linearized analyses. MARS normalization helps standardize cyclic starts before alignment and assay design.
+Sequence-level coverage does not directly establish:
 
-**Design versus validation data:** the design FASTA and validation FASTA have different roles. Independent validation data provide stronger evidence of generalizability than reusing only the design dataset.
+- amplification efficiency
+- limit of detection
+- analytical sensitivity
+- analytical specificity
+- robustness to reaction conditions
+- probe fluorescence performance
+- diagnostic sensitivity or specificity
 
-**Primer/probe mismatches:** computational mismatch counts are descriptive. Experimental impact depends on mismatch position, sequence context, oligonucleotide chemistry, melting temperature, reaction conditions, and other factors.
+Experimental validation remains required.
 
-**Full-site probe matches:** a full-length ungapped BLAST site can still contain mismatches and should not be interpreted as proof of efficient probe hybridization.
+### Validation-database composition matters
 
-**MFEprimer secondary structures:** the full-QC hairpin/dimer sections apply to the LEFT/RIGHT primers supplied to MFEprimer. The VarVAMP qPCR probe is evaluated separately by BLAST for sequence matching and is not subjected to a dedicated probe hairpin/dimer calculation in this workflow.
+Coverage estimates are conditional on the sequences included in the validation dataset. Database bias, incomplete lineage representation, duplicated sequences, partial genomes, and temporal sampling can all affect the resulting percentages.
 
-**MFEprimer report parser:** amplicon extraction currently depends on the legacy MFEprimer 3.x text-report structure. Do not infer full MFEprimer 4.x compatibility from index-file recognition.
+### Circular genomes
 
----
+For circular molecules, arbitrary FASTA start positions can distort a conventional linear alignment. MARS can reduce this problem by normalizing cyclic start positions before MAFFT.
 
-## Useful commands
+### Redundancy reduction
 
-Validate the Compose configuration:
+Clustering or exact deduplication can be useful during assay design, but validation should normally be performed against the original or another biologically representative dataset rather than only against cluster representatives.
 
-```bash
-docker compose config
-```
+### Probe mismatch counts
 
-Build or rebuild the Docker image:
+A mismatch count is descriptive. Its experimental effect depends on position, neighboring sequence context, probe chemistry, melting temperature, and reaction conditions.
 
-```bash
-docker compose build
-```
+### MFEprimer compatibility
 
-Display Workflow 01 options:
-
-```bash
-python3 01_varvamp_assay_design.py --help
-```
-
-Display Workflow 02 options:
-
-```bash
-python3 02_in_silico_validation.py --help
-```
-
-Inspect the generated project tree:
-
-```bash
-tree data work results
-```
-
-Check Python syntax before committing changes:
-
-```bash
-python -m py_compile 01_varvamp_assay_design.py
-python -m py_compile 02_in_silico_validation.py
-```
+Workflow 02 currently depends on the structure of the **MFEprimer 3.x text report**. Recognition of newer index formats does not imply full MFEprimer 4.x report compatibility.
 
 ---
 
-## Third-party software
+## Software used
 
-The source repository does not vendor third-party executable binaries.
+The workflow integrates established bioinformatics tools:
 
-`environment.yml` installs Conda/Bioconda dependencies, while the Dockerfile downloads or builds MARS and MFEprimer from their upstream sources during image construction.
+| Tool | Role |
+|---|---|
+| [VarVAMP](https://github.com/jonas-fuchs/varVAMP) | Degenerate primer/probe design for variable sequence alignments |
+| [MAFFT](https://mafft.cbrc.jp/alignment/software/) | Multiple-sequence alignment and orientation normalization |
+| [MARS](https://github.com/lorrainea/MARS) | Circular-sequence start-position normalization |
+| [SeqKit](https://github.com/shenwei356/seqkit) | FASTA manipulation and exact deduplication |
+| [CD-HIT](https://github.com/weizhongli/cdhit) | Similarity-based nucleotide clustering with CD-HIT-EST |
+| [trimAl](https://github.com/inab/trimal) | Multiple-sequence-alignment trimming |
+| [MFEprimer](https://github.com/quwubin/MFEprimer-3.0) | Primer quality control and predicted PCR-product analysis |
+| [NCBI BLAST+](https://blast.ncbi.nlm.nih.gov/) | qPCR probe sequence matching |
 
-The workflow uses or can use:
+Users should cite the original publications for the tools used in a reported analysis.
 
-- CD-HIT/CD-HIT-EST;
+---
 
-- MAFFT;
+## Selected software references
 
-- SeqKit;
-
-- MARS;
-
-- trimAl;
-
-- VarVAMP;
-
-- MFEprimer;
-
-- NCBI BLAST+.
-
-Users should cite the original software publications when reporting analyses produced using these tools.
-
-Before redistributing a built Docker image, review the licenses and redistribution terms of the third-party software included in that image.
-
+- Fuchs J, Kleine J, Schemmerer M, et al. **varVAMP: degenerate primer design for tiled full genome sequencing and qPCR.** *Nature Communications*. 2025;16:5067.
+- Katoh K, Standley DM. **MAFFT multiple sequence alignment software version 7: improvements in performance and usability.** *Molecular Biology and Evolution*. 2013;30:772–780. doi:10.1093/molbev/mst010.
+- Ayad LAK, Pissis SP. **MARS: improving multiple circular sequence alignment using refined sequences.** *BMC Genomics*. 2017;18:86.
+- Li W, Godzik A. **Cd-hit: a fast program for clustering and comparing large sets of protein or nucleotide sequences.** *Bioinformatics*. 2006;22:1658–1659. doi:10.1093/bioinformatics/btl158.
+- Capella-Gutiérrez S, Silla-Martínez JM, Gabaldón T. **trimAl: a tool for automated alignment trimming in large-scale phylogenetic analyses.** *Bioinformatics*. 2009;25:1972–1973. doi:10.1093/bioinformatics/btp348.
+- Wang K, Li H, Xu Y, et al. **MFEprimer-3.0: quality control for PCR primers.** *Nucleic Acids Research*. 2019;47:W610–W613. doi:10.1093/nar/gkz351.
+- Shen W, Sipos B, Zhao L. **SeqKit2: A Swiss Army Knife for Sequence and Alignment Processing.** *iMeta*. 2024;e191. doi:10.1002/imt2.191.
 
 ---
 
 ## Citation
 
-Citation metadata for this repository are provided in:
+Repository citation metadata are provided in:
 
 ```text
 CITATION.cff
+```
+
+When publishing analyses generated with this workflow, please also cite the relevant third-party software used in the analysis.
+
+---
+
+## Contributing
+
+Contributions, bug reports, reproducibility improvements, and scientifically motivated feature requests are welcome.
+
+See:
+
+```text
+CONTRIBUTING.md
 ```
 
 ---
 
 ## License
 
-The workflow code in this repository is licensed under the **GNU General Public License v3.0 or later**.
+The workflow source code is distributed under the **GNU General Public License v3.0 or later**.
 
 See:
 
@@ -1420,4 +778,4 @@ See:
 LICENSE
 ```
 
-Input sequence datasets and generated scientific results may be subject to separate terms depending on source databases, institutional policies, collaborators, or data-use agreements.
+Input datasets and generated scientific results may be subject to separate terms imposed by source databases, institutions, collaborators, or data-use agreements.
