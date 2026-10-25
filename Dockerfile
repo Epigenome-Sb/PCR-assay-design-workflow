@@ -50,7 +50,6 @@ RUN conda config --system --remove channels defaults \
 ENV PYTHONUNBUFFERED=1 MPLBACKEND=Agg
 WORKDIR /app
 COPY 01_varvamp_assay_design.py 02_in_silico_validation.py /app/
-COPY pcr_workflow/ /app/pcr_workflow/
 RUN mkdir -p data/design data/validation work results /opt/workflow-manifests
 
 # Every check runs inside the actual runtime environment; any failure aborts.
@@ -68,8 +67,6 @@ RUN set -eu; \
     if ldd /usr/local/bin/mars | grep -q 'not found'; then exit 1; fi; \
     python -c 'import sys, Bio, pandas, matplotlib.pyplot, PIL.Image, fitz, numpy, primer3, seqfold, varvamp; assert sys.version_info[:2] == (3, 11)'; \
     python -m pip check; \
-    python3 -m pcr_workflow design --help; \
-    python3 -m pcr_workflow validate --help; \
     python3 01_varvamp_assay_design.py --help; \
     python3 02_in_silico_validation.py --help; \
     conda list --explicit > /opt/workflow-manifests/conda-explicit.txt; \
