@@ -16,8 +16,8 @@ data/
 
 FASTA datasets stored under `data/design/` are used by:
 
-```bash
-python3 -m pcr_workflow design
+```text
+01_varvamp_assay_design.py
 ```
 
 for:
@@ -46,8 +46,8 @@ FASTA record IDs should be unique so sequences can be tracked reliably through p
 
 FASTA datasets stored under `data/validation/` are used by:
 
-```bash
-python3 -m pcr_workflow validate
+```text
+02_in_silico_validation.py
 ```
 
 for:
