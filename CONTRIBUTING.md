@@ -4,8 +4,13 @@ Contributions are welcome through GitHub issues and pull requests.
 
 This repository contains two main workflows:
 
-- `01_varvamp_assay_design.py` — nucleotide preprocessing, alignment, conservation analysis, and VarVAMP assay design;
-- `02_in_silico_validation.py` — in silico primer-pair validation and, for QPCR designs, qPCR probe validation.
+- `pcr_workflow/design/` — nucleotide preprocessing, alignment, conservation analysis, and VarVAMP assay design;
+- `pcr_workflow/validation/` — in silico primer-pair validation and, for QPCR designs, qPCR probe validation.
+
+Run the workflows with `python3 -m pcr_workflow design` or
+`python3 -m pcr_workflow validate`. The numbered root scripts remain as
+compatibility launchers. Shared runtime, path, and command helpers live in
+`pcr_workflow/core/`.
 
 The project supports VarVAMP `SINGLE`, `QPCR`, and `TILED` assay modes.
 

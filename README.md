@@ -136,6 +136,10 @@ The reported coverage metrics always refer to the supplied validation dataset af
 PCR-assay-design-workflow/
 ├── 01_varvamp_assay_design.py
 ├── 02_in_silico_validation.py
+├── pcr_workflow/
+│   ├── core/                 # shared runtime, paths, and external commands
+│   ├── design/               # FASTA, preprocessing, alignment, VarVAMP, reports
+│   └── validation/           # assay inputs, database, MFEprimer, probe analysis
 ├── Dockerfile
 ├── compose.yaml
 ├── .dockerignore
@@ -155,6 +159,10 @@ PCR-assay-design-workflow/
 ├── work/
 └── results/
 ```
+
+The numbered root scripts remain compatibility launchers. New invocations use
+`python3 -m pcr_workflow design` and `python3 -m pcr_workflow validate`; the
+package pipelines call the specialized modules in each workflow.
 
 The storage areas have distinct purposes:
 
@@ -284,8 +292,10 @@ data/design/my_design_dataset.fasta
 Run:
 
 ```bash
-python3 01_varvamp_assay_design.py
+python3 -m pcr_workflow design
 ```
+
+The numbered script remains available as a compatibility launcher.
 
 or with Docker:
 
@@ -304,8 +314,10 @@ data/validation/my_validation_dataset.fasta
 Run:
 
 ```bash
-python3 02_in_silico_validation.py
+python3 -m pcr_workflow validate
 ```
+
+The numbered script remains available as a compatibility launcher.
 
 or with Docker:
 
@@ -380,7 +392,7 @@ Workflow 01 supports multithreaded execution for tools that expose a thread opti
 In the current version, if `--threads` is omitted, the script detects the logical CPU threads available to the process and keeps two threads free when possible. A fixed value can still be requested explicitly:
 
 ```bash
-python3 01_varvamp_assay_design.py --threads 8
+python3 -m pcr_workflow design --threads 8
 ```
 
 The selected thread count is displayed at startup and recorded with the run.

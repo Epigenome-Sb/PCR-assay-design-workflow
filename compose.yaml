@@ -20,7 +20,9 @@ services:
       - -n
       - pcr-assay-design-workflow
       - python3
-      - 01_varvamp_assay_design.py
+      - -m
+      - pcr_workflow
+      - design
     command: []
 
   validation:
@@ -32,5 +34,7 @@ services:
       - -n
       - pcr-assay-design-workflow
       - python3
-      - 02_in_silico_validation.py
+      - -m
+      - pcr_workflow
+      - validate
     command: []
